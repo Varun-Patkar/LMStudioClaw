@@ -35,4 +35,4 @@ Thumbs.db
 
 # Project local/runtime artifacts
 .playwright-mcp/
-lmstudio_manager/configs/context_prefs.json
+lmstudioclaw/config/context_prefs.json

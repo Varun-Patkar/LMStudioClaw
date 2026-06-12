@@ -1,0 +1,103 @@
+"""WebSocket session hub and endpoint.
+
+Bridges the orchestrator engine to the browser. For each session the hub holds a
+:class:`SessionControl` (consumed by the engine) and the set of connected sockets.
+Server→client events emitted by the engine are broadcast to all attached sockets;
+client→server messages are translated into control signals (steer/queue/stop/message)
+and consent decisions per ``contracts/http-api.md``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass, field
+
+from fastapi import WebSocket, WebSocketDisconnect
+
+from ..orchestrator.engine import SessionControl
+
+
+@dataclass
+class _SessionChannel:
+    """Per-session control + connected sockets."""
+
+    control: SessionControl
+    sockets: set[WebSocket] = field(default_factory=set)
+
+
+class SessionHub:
+    """Tracks live session channels and fans events out to browser sockets."""
+
+    def __init__(self) -> None:
+        """Initialize an empty hub."""
+        self._channels: dict[str, _SessionChannel] = {}
+
+    def register(self, session_id: str) -> SessionControl:
+        """Create (or return) the control surface for a session."""
+        chan = self._channels.get(session_id)
+        if chan is None:
+            chan = _SessionChannel(control=SessionControl())
+            self._channels[session_id] = chan
+        return chan.control
+
+    def control(self, session_id: str) -> SessionControl | None:
+        """Return the control surface for a session, if registered."""
+        chan = self._channels.get(session_id)
+        return chan.control if chan else None
+
+    def unregister(self, session_id: str) -> None:
+        """Drop a session channel once the run is finished."""
+        self._channels.pop(session_id, None)
+
+    async def broadcast(self, session_id: str, event: dict) -> None:
+        """Send an event to every socket attached to a session."""
+        chan = self._channels.get(session_id)
+        if not chan:
+            return
+        dead: list[WebSocket] = []
+        for ws in chan.sockets:
+            try:
+                await ws.send_json(event)
+            except Exception:  # pragma: no cover - socket may close mid-send
+                dead.append(ws)
+        for ws in dead:
+            chan.sockets.discard(ws)
+
+    async def attach(self, session_id: str, websocket: WebSocket) -> None:
+        """Accept and register a websocket for a session."""
+        await websocket.accept()
+        chan = self._channels.get(session_id)
+        if chan is None:
+            chan = _SessionChannel(control=SessionControl())
+            self._channels[session_id] = chan
+        chan.sockets.add(websocket)
+
+    def detach(self, session_id: str, websocket: WebSocket) -> None:
+        """Remove a websocket from a session channel."""
+        chan = self._channels.get(session_id)
+        if chan:
+            chan.sockets.discard(websocket)
+
+
+async def session_ws_endpoint(websocket: WebSocket, session_id: str, hub: SessionHub) -> None:
+    """Handle a session WebSocket: forward client signals to the engine (FR-056–FR-060)."""
+    await hub.attach(session_id, websocket)
+    control = hub.register(session_id)
+    try:
+        while True:
+            msg = await websocket.receive_json()
+            kind = msg.get("type")
+            if kind == "steer":
+                control.steer(msg.get("text", ""))
+            elif kind == "queue":
+                control.queue(msg.get("text", ""))
+            elif kind == "message":
+                control.message(msg.get("text", ""))
+            elif kind == "stop":
+                control.stop(msg.get("scope", "turn"))
+            elif kind == "consent":
+                control.resolve_consent(msg.get("request_id", ""), bool(msg.get("granted")))
+    except WebSocketDisconnect:
+        hub.detach(session_id, websocket)
+    except Exception:  # pragma: no cover - defensive
+        hub.detach(session_id, websocket)

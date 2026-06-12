@@ -1,7 +1,7 @@
 [project]
 name = "lmstudio-manager"
 version = "1.0.0"
-description = "System tray GUI manager for LM Studio model load/unload and context preferences"
+description = "Call-based, local agent runtime powered by LM Studio (tray controller + web UI)"
 requires-python = ">=3.12"
 dependencies = [
     "openai>=1.30.0",
@@ -9,6 +9,12 @@ dependencies = [
     "httpx>=0.27.0",
     "pystray>=0.19.5",
     "pillow>=10.0.0",
+    "fastapi",
+    "uvicorn",
+    "pydantic",
+    "mcp",
+    "tiktoken",
+    "win11toast",
 ]
 
 [project.optional-dependencies]
@@ -19,9 +25,18 @@ dev = [
 ]
 
 [project.scripts]
-lmstudio = "lmstudio_manager.cli:cli"
+lmstudio = "lmstudioclaw.cli:cli"
+
+[tool.setuptools.packages.find]
+include = ["lmstudioclaw*"]
+
+[tool.setuptools.package-data]
+lmstudioclaw = ["config/*.yaml", "config/*.json", "web/static/**/*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
 
 [build-system]
 requires = ["setuptools>=69.0"]
 build-backend = "setuptools.build_meta"
-
