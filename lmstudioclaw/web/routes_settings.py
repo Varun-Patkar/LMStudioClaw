@@ -94,18 +94,26 @@ class ModelOp(BaseModel):
 
 @router.post("/api/models/load")
 async def load_model(payload: ModelOp, request: Request) -> dict:
-    """Manually load a model (Advanced)."""
+    """Manually load a model (Advanced); broadcasts live status (FR-005)."""
     ctrl = _ctrl(request)
     if not payload.model_key:
         raise HTTPException(422, "model_key required")
-    loaded = await ctrl.lifecycle.load(payload.model_key, payload.context_length)
+    await ctrl.set_model_status("loading", payload.model_key)
+    try:
+        loaded = await ctrl.lifecycle.load(payload.model_key, payload.context_length)
+    except Exception as exc:
+        await ctrl.set_model_status("error", payload.model_key, reason=str(exc))
+        raise HTTPException(502, f"Model load failed: {exc}") from exc
+    await ctrl.set_model_status("ready", loaded.key)
     return {"instance_id": loaded.instance_id, "key": loaded.key}
 
 
 @router.post("/api/models/unload")
 async def unload_model(request: Request) -> dict:
-    """Manually unload the current model (Advanced)."""
-    await _ctrl(request).lifecycle.unload_all()
+    """Manually unload the current model (Advanced); broadcasts live status (FR-005)."""
+    ctrl = _ctrl(request)
+    await ctrl.lifecycle.unload_all()
+    await ctrl.set_model_status("idle", None)
     return {"ok": True}
 
 

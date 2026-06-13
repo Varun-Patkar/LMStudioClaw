@@ -65,13 +65,37 @@ async function route() {
   renderNav(match.id);
   const view = document.getElementById("view");
   view.innerHTML = "";
+  view.append(loadingSkeleton());
   try {
-    await match.render(view);
+    const frag = document.createDocumentFragment();
+    await match.render(frag);
+    view.innerHTML = "";
+    view.append(frag);
   } catch (err) {
+    view.innerHTML = "";
     view.append(Object.assign(document.createElement("div"), {
       className: "card", textContent: "Error: " + err.message,
     }));
   }
+}
+
+/** A placeholder shown while a view's API calls are in flight (no blank page). */
+function loadingSkeleton() {
+  const wrap = document.createElement("div");
+  wrap.className = "skeleton-wrap";
+  for (let i = 0; i < 3; i++) {
+    const card = document.createElement("div");
+    card.className = "card skeleton-card";
+    const bar = document.createElement("div");
+    bar.className = "skeleton-bar";
+    const line1 = document.createElement("div");
+    line1.className = "skeleton-line";
+    const line2 = document.createElement("div");
+    line2.className = "skeleton-line short";
+    card.append(bar, line1, line2);
+    wrap.append(card);
+  }
+  return wrap;
 }
 
 // Compact-nav toggle for narrow viewports.

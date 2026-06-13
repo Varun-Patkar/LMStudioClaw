@@ -186,6 +186,17 @@ class Controller:
             self._model_status["reason"] = reason
         self._schedule_status()
 
+    async def set_model_status(self, status: str, model: str | None = None, reason: str | None = None) -> None:
+        """Async variant: update tracked model status and broadcast immediately.
+
+        Used by the manual model load/unload REST routes (which run on the event loop)
+        so the UI reflects load/ready/idle/error live without a page reload (FR-005).
+        """
+        self._model_status = {"type": "model_status", "status": status, "model": model}
+        if reason:
+            self._model_status["reason"] = reason
+        await self._broadcast_status()
+
     # -- persisted-queue restore / reconciliation (FR-025a) ----------------
 
     def _reconcile_interrupted_runs(self) -> None:

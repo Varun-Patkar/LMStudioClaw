@@ -109,11 +109,16 @@ function advancedCard(modelsResp, root) {
           try { await post("/api/models/context-pref", { model_key: m.key, context_length: Number(ctx.value) }); toast("Saved."); }
           catch (e) { toast(e.message); }
         } }, "Set context"),
-        loadButton(m, ctx))));
+        loadButton(m, ctx, root))));
   });
   const unloadBtn = el("button", { class: "btn red", onclick: async () => {
-    try { await post("/api/models/unload", {}); toast("Unloaded."); } catch (e) { toast(e.message); }
+    unloadBtn.disabled = true;
+    try { await post("/api/models/unload", {}); toast("Unloaded."); reloadSettings(root); }
+    catch (e) { toast(e.message); unloadBtn.disabled = false; }
   } }, "Unload current");
+  // Nothing loaded → nothing to unload (FR: disabled when no active model).
+  const anyLoaded = modelsResp.models.some((m) => m.is_loaded);
+  if (!anyLoaded) { unloadBtn.disabled = true; unloadBtn.title = "No model is currently loaded"; }
   return el("div", { class: "card" },
     el("div", { class: "row" }, el("h2", {}, "Advanced → Model Management"),
       el("span", { class: "spacer" }), unloadBtn),
@@ -122,14 +127,21 @@ function advancedCard(modelsResp, root) {
       el("tbody", {}, ...rows)));
 }
 
+/** Re-render the whole Settings view (used after a load/unload to refresh state). */
+function reloadSettings(root) {
+  root.innerHTML = "";
+  renderSettings(root);
+}
+
 // -- helpers ----------------------------------------------------------------
 
 /**
  * A "Load" button that gives immediate non-blocking feedback (FR-004): on click it
- * shows a spinner and disables itself, then restores once the request returns. Actual
- * load status (ready/error) arrives live via /ws/status, so no page reload is needed.
+ * shows a spinner and disables itself. The request awaits the actual load result, then
+ * refreshes the table so the State column + Unload button reflect the new state; the
+ * top-right indicator also updates live via /ws/status (no page reload needed).
  */
-function loadButton(m, ctx) {
+function loadButton(m, ctx, root) {
   const btn = el("button", { class: "btn green" }, "Load");
   btn.addEventListener("click", async () => {
     btn.disabled = true;
@@ -137,10 +149,10 @@ function loadButton(m, ctx) {
     btn.append(el("span", { class: "spinner" }), document.createTextNode(" Loading…"));
     try {
       await post("/api/models/load", { model_key: m.key, context_length: Number(ctx.value) });
-      toast("Load requested — watch the status indicator.");
+      toast(`Loaded ${m.display_name}.`);
+      reloadSettings(root);
     } catch (e) {
       toast(e.message);
-    } finally {
       btn.disabled = false;
       btn.textContent = "Load";
     }

@@ -27,11 +27,17 @@ export function renderRunbar(mount, state) {
   } else if (modelStatus === "loading") {
     cls += " loading";
     label = "Loading model…";
+  } else if (modelStatus === "ready") {
+    cls += " active";
+    label = state.model && state.model.model ? `Model ready · ${state.model.model}` : "Model ready";
+  } else if (modelStatus === "error") {
+    cls += " error";
+    label = "Load failed";
   }
 
   const indicator = el("div", {
     class: cls,
-    title: active ? "Open the running session" : "Nothing is running",
+    title: active ? "Open the running session" : (modelStatus === "error" && state.model && state.model.reason) || "App status",
     onclick: () => {
       if (active) location.hash = `sessions/detail/${active.id}`;
     },
