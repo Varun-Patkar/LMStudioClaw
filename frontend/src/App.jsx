@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { NavLink, Route, Routes, useLocation } from "react-router-dom";
+import { Navigate, NavLink, Route, Routes, useLocation } from "react-router-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import { get, useStatusSocket } from "./api.js";
 import Runbar from "./components/Runbar.jsx";
@@ -64,7 +64,7 @@ export default function App() {
 
       <AnimatePresence mode="wait">
         <Routes location={location} key={location.pathname.split("/").slice(0, 2).join("/")}>
-          <Route path="/" element={<Page><Sessions /></Page>} />
+          <Route path="/" element={<Navigate to="/sessions" replace />} />
           <Route path="/sessions" element={<Page><Sessions /></Page>} />
           <Route path="/sessions/:id" element={<Page><SessionDetail /></Page>} />
           <Route path="/automations" element={<Page><Automations /></Page>} />
