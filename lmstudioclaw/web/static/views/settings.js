@@ -153,19 +153,19 @@ async function save(patchBody) {
 }
 
 function field(label, control) {
-  return el("div", { class: "row", style: "margin:6px 0" },
-    el("label", { style: "width:240px" }, label), control);
+  return el("div", { class: "set-field" },
+    el("label", {}, label), control);
 }
 
 function checkbox(checked, onChange) {
-  const box = el("input", { type: "checkbox" });
+  const box = el("input", { type: "checkbox", class: "switch" });
   box.checked = !!checked;
   box.addEventListener("change", () => onChange(box.checked));
   return box;
 }
 
 function numberInput(value, onChange, step) {
-  const input = el("input", { type: "number", value: String(value), style: "width:120px" });
+  const input = el("input", { type: "number", value: String(value) });
   if (step) input.step = String(step);
   input.addEventListener("change", () => onChange(Number(input.value)));
   return input;
