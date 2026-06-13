@@ -183,12 +183,24 @@ class OpenIn(BaseModel):
 
 @router.post("/api/open-in-vscode")
 async def open_in_vscode(payload: OpenIn) -> dict:
-    """Open a referenced path in VS Code; clear error if unavailable (FR-074)."""
+    """Open a referenced path in VS Code; clear error if unavailable (FR-074).
+
+    On Windows the ``code`` launcher is ``code.cmd`` (a batch script), which
+    ``subprocess`` cannot execute directly (raising ``WinError 193``). We resolve the
+    real launcher and run ``.cmd``/``.bat`` shims through ``cmd /c`` so the editor opens.
+    """
+    import os
+
     code = shutil.which("code") or shutil.which("code.cmd")
     if code is None:
         raise HTTPException(501, "VS Code ('code' command) is not available on PATH.")
+    # A .cmd/.bat shim must be launched via the command interpreter on Windows.
+    if os.name == "nt" and code.lower().endswith((".cmd", ".bat")):
+        cmd = ["cmd", "/c", code, payload.path]
+    else:
+        cmd = [code, payload.path]
     try:
-        subprocess.Popen([code, payload.path])  # noqa: S603 - launching the user's editor
+        subprocess.Popen(cmd)  # noqa: S603 - launching the user's editor
     except OSError as exc:
         raise HTTPException(500, f"Failed to launch VS Code: {exc}") from exc
     return {"ok": True}

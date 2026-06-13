@@ -19,10 +19,17 @@ from ..orchestrator.engine import SessionControl
 
 @dataclass
 class _SessionChannel:
-    """Per-session control + connected sockets."""
+    """Per-session control + connected sockets + a small replayable snapshot.
+
+    ``last_budget`` and ``generating`` are cached so a socket that connects (or
+    reconnects) mid-run immediately sees the token gauge and the correct
+    working/idle state instead of a stale ``0/0`` until the next turn.
+    """
 
     control: SessionControl
     sockets: set[WebSocket] = field(default_factory=set)
+    last_budget: dict | None = None
+    generating: bool = False
 
 
 class SessionHub:
@@ -54,6 +61,14 @@ class SessionHub:
         chan = self._channels.get(session_id)
         if not chan:
             return
+        # Cache snapshot-worthy state so late joiners can be brought up to date.
+        etype = event.get("type")
+        if etype == "budget":
+            chan.last_budget = event
+        elif etype == "turn":
+            chan.generating = event.get("state") == "start"
+        elif etype == "status" and event.get("status") in ("completed", "failed", "stopped"):
+            chan.generating = False
         dead: list[WebSocket] = []
         for ws in chan.sockets:
             try:
@@ -64,13 +79,24 @@ class SessionHub:
             chan.sockets.discard(ws)
 
     async def attach(self, session_id: str, websocket: WebSocket) -> None:
-        """Accept and register a websocket for a session."""
+        """Accept and register a websocket for a session, replaying its snapshot."""
         await websocket.accept()
         chan = self._channels.get(session_id)
         if chan is None:
             chan = _SessionChannel(control=SessionControl())
             self._channels[session_id] = chan
         chan.sockets.add(websocket)
+        # Bring the new socket up to date with cached run state (no polling).
+        if chan.last_budget is not None:
+            try:
+                await websocket.send_json(chan.last_budget)
+            except Exception:  # pragma: no cover - socket may close mid-send
+                pass
+        try:
+            await websocket.send_json(
+                {"type": "turn", "state": "start" if chan.generating else "end"})
+        except Exception:  # pragma: no cover - socket may close mid-send
+            pass
 
     def detach(self, session_id: str, websocket: WebSocket) -> None:
         """Remove a websocket from a session channel."""

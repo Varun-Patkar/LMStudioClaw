@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS capabilities (
     enabled INTEGER NOT NULL DEFAULT 0,
     trust_confirmed INTEGER NOT NULL DEFAULT 0,
     secret_refs TEXT,
+    metadata TEXT,
     added_by TEXT NOT NULL DEFAULT 'user',
     created_at TEXT NOT NULL
 );
@@ -180,6 +181,7 @@ class Store:
         for table, column in (
             ("sessions", "run_config TEXT"),
             ("automations", "run_config TEXT"),
+            ("capabilities", "metadata TEXT"),
         ):
             with self._lock:
                 try:
@@ -489,24 +491,34 @@ class Store:
         )
         cid = existing["id"] if existing else (data.get("id") or new_id())
         secret_refs = json.dumps(data.get("secret_refs", []))
+        has_meta = "metadata" in data
+        meta_json = json.dumps(data.get("metadata")) if data.get("metadata") is not None else None
         if existing:
-            self._exec(
-                """UPDATE capabilities SET source_path=?, description=?, status=?,
-                   secret_refs=? WHERE id=?""",
-                (data.get("source_path"), data.get("description"),
-                 data.get("status", "valid"), secret_refs, cid),
-            )
+            if has_meta:
+                self._exec(
+                    """UPDATE capabilities SET source_path=?, description=?, status=?,
+                       secret_refs=?, metadata=? WHERE id=?""",
+                    (data.get("source_path"), data.get("description"),
+                     data.get("status", "valid"), secret_refs, meta_json, cid),
+                )
+            else:
+                self._exec(
+                    """UPDATE capabilities SET source_path=?, description=?, status=?,
+                       secret_refs=? WHERE id=?""",
+                    (data.get("source_path"), data.get("description"),
+                     data.get("status", "valid"), secret_refs, cid),
+                )
         else:
             self._exec(
                 """INSERT INTO capabilities
                    (id, kind, name, source_path, description, status, enabled,
-                    trust_confirmed, secret_refs, added_by, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    trust_confirmed, secret_refs, metadata, added_by, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (cid, data["kind"], data["name"], data.get("source_path"),
                  data.get("description"), data.get("status", "valid"),
                  1 if data.get("enabled") else 0,
                  1 if data.get("trust_confirmed") else 0,
-                 secret_refs, data.get("added_by", "user"), _now()),
+                 secret_refs, meta_json, data.get("added_by", "user"), _now()),
             )
         return cid
 
@@ -518,6 +530,7 @@ class Store:
             rows = self._query("SELECT * FROM capabilities")
         for r in rows:
             r["secret_refs"] = json.loads(r["secret_refs"]) if r.get("secret_refs") else []
+            r["metadata"] = json.loads(r["metadata"]) if r.get("metadata") else None
         return rows
 
     def get_capability(self, cap_id: str) -> dict[str, Any] | None:

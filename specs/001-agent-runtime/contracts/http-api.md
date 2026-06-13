@@ -46,6 +46,15 @@ Base URL: `http://localhost:{web_port}` (with fallback port if taken; the tray o
 | PATCH | `/api/capabilities/{id}` | Enable/disable; for tools, set `trust_confirmed` (requires explicit confirm — FR-015). |
 | POST | `/api/capabilities/mcp` | Add an MCP server entry (writes `mcp.json`; secret values via the secrets endpoint only). |
 
+`POST /api/capabilities/mcp` body uses the standard MCP config shape. Either a stdio
+server (`command`/`args`/`env`) or an HTTP server (`type` `"http"`/`"sse"` + `url` +
+optional auth `headers`):
+
+```json
+{ "name": "files",  "command": "npx", "args": ["-y", "server-pkg"], "env": { "KEY": "value" } }
+{ "name": "remote", "type": "http", "url": "https://host/mcp", "headers": { "Authorization": "Bearer <token>" } }
+```
+
 ### Secrets (user-only; values write-only)
 
 | Method | Path | Purpose |

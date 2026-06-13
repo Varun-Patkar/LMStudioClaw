@@ -77,6 +77,11 @@ class PathGate:
         self._paths = paths
         self._store = store
         self._workspace = _canon(paths.workspace)
+        # The whole Documents/LMStudioClaw area (skills, tools, memory, mcp.json, …) is
+        # the agent's home and is implicitly allowed without prompting — the secrets
+        # directory and app internals are NOT under it and stay on the deny-list, which
+        # is always evaluated first below (FR-020/FR-077).
+        self._base = _canon(paths.base)
         self._deny_list = tuple(_canon(p) for p in paths.deny_list)
 
     def _access_satisfies(self, granted: str, requested: Access) -> bool:
@@ -112,6 +117,11 @@ class PathGate:
         # 2. Workspace is always allowed (read or write) and covers subfolders.
         if _is_within(target, self._workspace):
             return Decision(DecisionKind.ALLOW, str(target), access, reason="workspace")
+
+        # 2b. The agent's Documents home (Documents/LMStudioClaw) is implicitly allowed,
+        # so config like mcp.json, skills, tools, and memory need no prompt (FR-020).
+        if _is_within(target, self._base):
+            return Decision(DecisionKind.ALLOW, str(target), access, reason="home")
 
         # 3. Hierarchical grant prefix match (parent grant covers subfolders).
         for grant in self._store.active_grants(session_id=session_id):

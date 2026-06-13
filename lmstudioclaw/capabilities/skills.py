@@ -28,6 +28,7 @@ class SkillInfo:
     scripts: list[str] = field(default_factory=list)
     valid: bool = True
     error: str | None = None
+    secrets: object = None  # optional front-matter ``secrets``: list[ref] or {ENV_VAR: ref}
 
 
 def _split_front_matter(text: str) -> tuple[dict, str]:
@@ -79,9 +80,10 @@ def load_skill(folder: Path) -> SkillInfo:
         p.name for p in folder.iterdir()
         if p.is_file() and p.name != "SKILL.md"
     )
+    secrets = meta.get("secrets") if isinstance(meta.get("secrets"), (list, dict)) else None
     return SkillInfo(
         name=name, description=description, source_path=str(folder),
-        instructions=body, scripts=scripts, valid=True,
+        instructions=body, scripts=scripts, valid=True, secrets=secrets,
     )
 
 

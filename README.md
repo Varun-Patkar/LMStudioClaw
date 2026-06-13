@@ -18,13 +18,17 @@ inside a folder-consent boundary), then unloads the model and records the run.
   **queuing** (Alt+Enter), **Stop**, and automatic **context compaction** near the
   context limit.
 - **Single-active FIFO queue** — exactly one session runs at a time; never two models at once.
-- **Consent-bounded filesystem** — the agent freely uses its `workspace/`, and must
-  request hierarchical, least-privilege access to anything else (session or permanent
-  grants, revocable).
+- **Consent-bounded filesystem** — the agent freely uses its whole
+  `Documents\LMStudioClaw` home (workspace, skills, tools, memory, `mcp.json`) with no
+  prompt, and must request hierarchical, least-privilege access to anything else
+  (session or permanent grants, revocable). Secrets + app internals are never reachable.
+- **Readable tool actions** — the transcript shows what the agent did as friendly cards
+  ("Read X", "Created Y", "Edited Z +n −m") with an expandable side-by-side diff,
+  new-file contents, or a deletion note — never the raw tool name.
 - **Automations** — Daily (weekdays + time) or Interval schedules, new or persistent
   sessions, run/missed notifications.
 - **Skills, tools, MCP** — drop a `SKILL.md` folder, add a trusted custom Python tool, or
-  register an MCP server.
+  register an MCP server (local `stdio` or remote `http`/`sse` with auth headers).
 - **Isolated secrets** — stored outside any agent-reachable path; the agent can use a
   capability that needs a secret, but can never read the value.
 - **Personas** — an editable default plus a library, selectable per session/automation.
@@ -67,7 +71,8 @@ Or use `lmstudio.bat` (also suitable for a `shell:startup` shortcut to launch on
 - **Sessions** — start a session, watch streaming output, steer/queue/stop, manage folder
   permissions, and browse past runs.
 - **Automations** — schedule Daily/Interval tasks, new vs persistent sessions, run now.
-- **Skills & Tools** — enable skills, trust + enable custom tools, add MCP servers, set
+- **Skills & Tools** — enable skills, trust + enable custom tools, add MCP servers
+  (choose `stdio` with a command or `http`/`sse` with a URL + auth headers), set
   secrets (write-only).
 - **Settings** — theme, default model, startup, timeouts, retention, compression threshold,
   personas, and **Advanced → Model Management** (per-model context, manual load/unload/warmup).
@@ -77,6 +82,20 @@ Or use `lmstudio.bat` (also suitable for a `shell:startup` shortcut to launch on
 - Connection defaults: `lmstudioclaw/config/default.yaml` (`lmstudio.base_url`, `lmstudio.api_key`).
 - Per-model context prefs: `lmstudioclaw/config/context_prefs.json` (managed in Advanced).
 - Settings: stored under `%APPDATA%/LMStudioClaw/settings.json`.
+- MCP servers: `Documents\LMStudioClaw\mcp.json` (standard MCP config format). Local
+  servers use `command`/`args`/`env`; remote servers use `type` + `url` + auth `headers`:
+
+  ```json
+  {
+    "mcpServers": {
+      "files":  { "command": "npx", "args": ["-y", "server-pkg"], "env": { "KEY": "value" } },
+      "remote": { "type": "http", "url": "https://host/mcp", "headers": { "Authorization": "Bearer <token>" } }
+    }
+  }
+  ```
+
+  Use `type` `"http"` (Streamable HTTP) or `"sse"` for remote servers; auth keys go in
+  `headers` and are never logged.
 
 ## Tests
 

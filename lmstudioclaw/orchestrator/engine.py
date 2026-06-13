@@ -340,10 +340,12 @@ class Engine:
         result = await self._registry.invoke_tool(name, args, consent=consent_fn)
 
         await on_event({"type": "tool_result", "name": name, "ok": result.ok,
-                        "summary": (result.output[:200] if result.ok else result.error)})
+                        "summary": (result.output[:200] if result.ok else result.error),
+                        "meta": result.meta})
         self._store.add_turn(session_id, role="tool",
                              tool_result={"ok": result.ok,
-                                          "output": result.output, "error": result.error})
+                                          "output": result.output, "error": result.error,
+                                          "meta": result.meta})
         messages.append({
             "role": "tool", "tool_call_id": call["id"],
             "content": result.output if result.ok else f"ERROR: {result.error}",

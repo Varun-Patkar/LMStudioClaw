@@ -37,11 +37,13 @@ async def list_capabilities(request: Request) -> list[dict]:
 
 @router.get("/api/tools")
 async def list_tools(request: Request) -> dict:
-    """List tool names available for per-run overrides + MCP servers (US4).
+    """List tool names available for per-run overrides + MCP servers/tools (US4).
 
-    Returns the default built-in tools (always present), any registered custom/MCP
-    tools, and the MCP server names — enough for the run-config UI to render per-run
-    enable/disable toggles and an MCP selection. No discovery side effects are forced.
+    Returns the default built-in tools (always present), any registered custom tools,
+    and the MCP servers — each with the tools it exposes (name + description) so the
+    run-config UI can offer per-server **and** per-tool granularity with hover
+    descriptions. No discovery side effects are forced (tool lists are read from the
+    capability rows persisted on the last successful connect).
     """
     ctrl = _ctrl(request)
     _sync = getattr(ctrl.registry, "sync_mcp_rows", None)
@@ -50,12 +52,42 @@ async def list_tools(request: Request) -> dict:
     builtins = [{"name": t.name, "description": t.description}
                 for t in ctrl.registry._builtin_tools()]
     extras = [c for c in ctrl.store.list_capabilities() if c.get("kind") in ("tool", "mcp")]
-    mcp_servers = sorted({c["name"] for c in extras if c.get("kind") == "mcp"})
+    # Only genuine custom Python tools belong in the per-run tool list; MCP servers are
+    # toggled separately under "MCP servers for this run" (avoid listing them twice).
+    custom_tools = [{"name": c["name"], "kind": c["kind"]}
+                    for c in extras if c.get("kind") == "tool"]
+    # MCP servers, each with the tools discovered on the last successful connect. The
+    # tool's per-run id is the namespaced "{server}__{tool}" used by tool_overrides.
+    mcp = []
+    for c in sorted((c for c in extras if c.get("kind") == "mcp"), key=lambda x: x["name"]):
+        meta = c.get("metadata") or {}
+        tools = meta.get("tools") or []
+        mcp.append({
+            "name": c["name"],
+            "description": c.get("description") or "",
+            "status": c.get("status"),
+            "tools": [{"id": f"{c['name']}__{t.get('name', '')}",
+                       "name": t.get("name", ""),
+                       "description": t.get("description", "")} for t in tools],
+        })
     return {
         "builtin": builtins,
-        "tools": [{"name": c["name"], "kind": c["kind"]} for c in extras],
-        "mcp_servers": mcp_servers,
+        "tools": custom_tools,
+        # Backward-compatible flat list of server names plus the richer per-server detail.
+        "mcp_servers": [m["name"] for m in mcp],
+        "mcp": mcp,
     }
+
+
+@router.get("/api/capabilities/mcp-config-path")
+async def mcp_config_path(request: Request) -> dict:
+    """Return the absolute ``mcp.json`` path so the UI can open it in VS Code (FR-074).
+
+    Lets the user fix a malformed/failed MCP entry directly when a server is stuck in
+    ``connect_failed`` rather than only via the add-form.
+    """
+    ctrl = _ctrl(request)
+    return {"path": str(ctrl.paths.mcp_json)}
 
 
 @router.post("/api/capabilities/refresh")
@@ -97,12 +129,20 @@ async def patch_capability(cap_id: str, payload: CapabilityPatch, request: Reque
 
 
 class McpIn(BaseModel):
-    """Add an MCP server entry to ``mcp.json``."""
+    """Add an MCP server entry to ``mcp.json``.
+
+    Supports both transports in the standard MCP config format: stdio
+    (``command``/``args``/``env``) and HTTP (``type``/``url``/``headers``). Auth
+    keys for HTTP servers travel in ``headers`` (e.g. an ``Authorization`` bearer).
+    """
 
     name: str
     command: str | None = None
     args: list[str] | None = None
+    env: dict[str, str] | None = None
     url: str | None = None
+    type: str | None = None
+    headers: dict[str, str] | None = None
     secret_refs: list[str] | None = None
 
 
@@ -148,6 +188,27 @@ async def delete_mcp(name: str, request: Request) -> dict:
 async def list_secrets(request: Request) -> list[dict]:
     """List secret reference names + owners only — never values (FR-026)."""
     return _ctrl(request).vault.list_refs()
+
+
+@router.get("/api/secrets/missing")
+async def missing_secrets(request: Request) -> dict:
+    """List secret refs used in ``mcp.json`` that are not yet stored in the vault.
+
+    Lets the UI prompt the user to fill in any ``${secret:REF}`` an MCP server needs
+    (e.g. right after the agent adds a server), so the value can be set without the
+    agent ever seeing it. Values are never returned — only the missing ref names.
+    """
+    import re
+
+    ctrl = _ctrl(request)
+    refs: set[str] = set()
+    try:
+        text = ctrl.paths.mcp_json.read_text(encoding="utf-8")
+        refs = set(re.findall(r"\$\{secret:([^}]+)\}", text))
+    except OSError:
+        refs = set()
+    have = {r["ref_name"] for r in ctrl.vault.list_refs()}
+    return {"missing": sorted(refs - have)}
 
 
 class SecretIn(BaseModel):

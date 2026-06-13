@@ -31,12 +31,14 @@ ConsentFn = Callable[[str, Access], Awaitable[bool]]
 TOOL_TIMEOUT = 60
 
 
-def _exec_script(path: str, args: list) -> tuple[bool, str, str | None]:
+def _exec_script(path: str, args: list, env: dict | None = None) -> tuple[bool, str, str | None]:
     """Run a referenced skill script via subprocess with a timeout (blocking).
 
     Returns ``(ok, stdout, error)``. Python scripts run under the current
     interpreter; other files run directly. Output is truncated to keep tool results
-    bounded.
+    bounded. ``env`` (when given) fully replaces the child environment — callers pass
+    a copy of ``os.environ`` plus any injected secrets so values stay out of the
+    agent's context.
     """
     import subprocess
     import sys
@@ -44,7 +46,7 @@ def _exec_script(path: str, args: list) -> tuple[bool, str, str | None]:
     cmd = [sys.executable, path, *map(str, args)] if path.endswith(".py") else [path, *map(str, args)]
     try:
         proc = subprocess.run(  # noqa: S603 - running a user-provided skill script
-            cmd, capture_output=True, text=True, timeout=TOOL_TIMEOUT,
+            cmd, capture_output=True, text=True, timeout=TOOL_TIMEOUT, env=env,
         )
     except subprocess.TimeoutExpired:
         return False, "", f"Script timed out after {TOOL_TIMEOUT}s"
@@ -79,11 +81,17 @@ class ToolSpec:
 
 @dataclass
 class ToolResult:
-    """Outcome of a tool invocation."""
+    """Outcome of a tool invocation.
+
+    ``meta`` carries optional structured details for the UI (e.g. file-change info
+    like the action and before/after content for a diff view). It is display-only —
+    it never enters the model context, which only sees ``output``.
+    """
 
     ok: bool
     output: str
     error: str | None = None
+    meta: dict[str, Any] | None = None
 
 
 @dataclass
@@ -97,16 +105,24 @@ class SkillDoc:
 class CapabilityRegistry:
     """Holds and dispatches capabilities; routes file I/O through consent."""
 
-    def __init__(self, paths, store, path_gate: PathGate) -> None:
-        """Wire the registry to app paths, the store, and the consent gate."""
+    def __init__(self, paths, store, path_gate: PathGate, vault=None) -> None:
+        """Wire the registry to app paths, the store, the consent gate, and the vault.
+
+        ``vault`` (optional) lets MCP ``env``/``headers`` values reference a stored
+        secret as ``${secret:REF_NAME}``; the value is resolved at connect time only
+        and never logged or surfaced (FR-077).
+        """
         self._paths = paths
         self._store = store
         self._gate = path_gate
+        self._vault = vault
         # Extra (non-built-in) tools registered by skills/tools/mcp modules.
         self._extra_tools: dict[str, ToolSpec] = {}
         self._skills: list[SkillDoc] = []
         # Map of skill name -> {script_name: absolute_path} for the script runner.
         self._skill_scripts: dict[str, dict[str, str]] = {}
+        # Map of skill name -> declared secret refs ({ENV_VAR: ref} or [ref, ...]).
+        self._skill_secrets: dict[str, Any] = {}
 
     # -- discovery / registration ------------------------------------------
 
@@ -140,6 +156,8 @@ class CapabilityRegistry:
                         script: str(Path(info.source_path) / script)
                         for script in info.scripts
                     }
+                if getattr(info, "secrets", None):
+                    self._skill_secrets[info.name] = info.secrets
         if self._skill_scripts:
             self.register_tool(self._script_runner_tool())
 
@@ -170,9 +188,23 @@ class CapabilityRegistry:
                 self.register_tool(self._wrap_custom_tool(mod))
 
     def _wrap_custom_tool(self, mod) -> ToolSpec:
-        """Wrap a loaded custom tool module as a consent-agnostic ToolSpec."""
+        """Wrap a loaded custom tool module as a consent-agnostic ToolSpec.
+
+        If the module declares ``SECRETS`` (a list of ref names or ``{ENV_VAR: ref}``),
+        the resolved values are passed as a reserved ``_secrets`` keyword (a
+        ``{name: value}`` dict) at call time. They are never part of the tool's
+        ``PARAMETERS``/model context, so the agent cannot see them (FR-077). Passing a
+        kwarg (rather than mutating ``os.environ``) keeps this safe under the
+        ``parallel`` tool, which may run several tools concurrently.
+        """
+        secrets_decl = getattr(mod, "secrets", None)
+
         async def _handler(*, consent: ConsentFn = None, **kwargs) -> ToolResult:
             try:
+                if secrets_decl:
+                    resolved = self._secret_env(secrets_decl)
+                    if resolved:
+                        kwargs["_secrets"] = resolved
                 result = mod.run(**kwargs)
                 if asyncio.iscoroutine(result):
                     result = await result
@@ -206,14 +238,63 @@ class CapabilityRegistry:
             if not (cap and cap["enabled"]):
                 continue
             try:
-                tools = list_tools(server)
+                tools = list_tools(self._resolve_secrets(server))
             except Exception as exc:
                 self._store.update_capability(cap_id, status="connect_failed",
                                               description=f"Connect failed: {exc}")
                 continue
             self._store.update_capability(cap_id, status="valid")
+            # Persist the tool list (name + description) so the run-config UI can offer
+            # per-tool granularity + hover descriptions without re-connecting (FR-030a).
+            tool_meta = [{"name": t.get("name", ""), "description": t.get("description", "")}
+                         for t in tools]
+            self._store.upsert_capability({
+                "kind": "mcp", "name": server.name, "source_path": None,
+                "description": f"MCP server '{server.name}'", "status": "valid",
+                "metadata": {"tools": tool_meta},
+            })
             for tool in tools:
                 self.register_tool(self._wrap_mcp_tool(server, tool))
+
+    def _resolve_secrets(self, server):
+        """Return a copy of ``server`` with ``${secret:REF}`` env/headers resolved.
+
+        Only trusted runtime code calls this; resolved values are passed straight to
+        the MCP client and never logged or returned to the agent/UI.
+        """
+        import dataclasses
+        import re
+
+        pattern = re.compile(r"^\$\{secret:([^}]+)\}$")
+
+        def _sub(mapping: dict[str, str]) -> dict[str, str]:
+            if not mapping or self._vault is None:
+                return mapping
+            out = dict(mapping)
+            for key, val in mapping.items():
+                match = pattern.match(str(val).strip())
+                if match:
+                    resolved = self._vault.inject({key: match.group(1)})
+                    if key in resolved:
+                        out[key] = resolved[key]
+            return out
+
+        return dataclasses.replace(server, env=_sub(server.env), headers=_sub(server.headers))
+
+    def _secret_env(self, refs) -> dict[str, str]:
+        """Resolve declared secret refs to a ``{ENV_VAR: value}`` mapping via the vault.
+
+        ``refs`` is either a list of ref names (each becomes its own env-var name) or a
+        dict ``{ENV_VAR: ref_name}``. Values are fetched only at call time and never
+        enter the model context, tool parameters, or logs (FR-077). Unknown refs are
+        dropped silently so a missing secret cannot leak as a placeholder. Used by both
+        custom tools and skill scripts so any capability can consume a secret the agent
+        cannot read.
+        """
+        if not refs or self._vault is None:
+            return {}
+        mapping = refs if isinstance(refs, dict) else {str(r): str(r) for r in refs}
+        return self._vault.inject({str(k): str(v) for k, v in mapping.items()})
 
     def _wrap_mcp_tool(self, server, tool: dict) -> ToolSpec:
         """Wrap an MCP tool as a ToolSpec dispatched over a short-lived session."""
@@ -223,11 +304,18 @@ class CapabilityRegistry:
         tool_name = f"{server.name}__{tool['name']}"
 
         async def _handler(*, consent: ConsentFn = None, **kwargs) -> ToolResult:
+            # Attach display-only meta (server/tool + input/output) so the UI can show
+            # an expandable input→output panel for MCP calls. ``meta`` never re-enters
+            # the model context — only ``output`` does.
+            base_meta = {"action": "mcp", "server": server.name, "tool": tool["name"],
+                         "input": kwargs}
             try:
-                output = await asyncio.to_thread(call_tool, server, tool["name"], kwargs)
-                return ToolResult(True, output)
+                live = self._resolve_secrets(server)
+                output = await asyncio.to_thread(call_tool, live, tool["name"], kwargs)
+                return ToolResult(True, output, meta={**base_meta, "output": output})
             except Exception as exc:  # pragma: no cover - depends on live server
-                return ToolResult(False, "", error=f"MCP tool '{tool_name}' failed: {exc}")
+                err = f"MCP tool '{tool_name}' failed: {exc}"
+                return ToolResult(False, "", error=err, meta={**base_meta, "output": err})
 
         return ToolSpec(tool_name, tool.get("description", ""), tool.get("parameters", {}), _handler)
 
@@ -288,6 +376,7 @@ class CapabilityRegistry:
         self._extra_tools.clear()
         self._skills.clear()
         self._skill_scripts.clear()
+        self._skill_secrets.clear()
 
     def _script_runner_tool(self) -> ToolSpec:
         """Build a tool that runs a referenced script from an enabled skill (FR-012)."""
@@ -297,8 +386,15 @@ class CapabilityRegistry:
             path = scripts.get(script)
             if path is None:
                 return ToolResult(False, "", error=f"Unknown script '{script}' for skill '{skill}'")
+            # Inject any secrets the skill declared as env vars for the child process,
+            # so the script can authenticate without the value ever reaching the agent.
+            env = None
+            secret_env = self._secret_env(self._skill_secrets.get(skill))
+            if secret_env:
+                import os
+                env = {**os.environ, **secret_env}
             try:
-                completed = await asyncio.to_thread(_exec_script, path, args or [])
+                completed = await asyncio.to_thread(_exec_script, path, args or [], env)
             except Exception as exc:  # pragma: no cover - subprocess edge cases
                 return ToolResult(False, "", error=f"Script failed: {exc}")
             return ToolResult(completed[0], completed[1], error=completed[2])

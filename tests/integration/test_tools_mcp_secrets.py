@@ -125,3 +125,85 @@ def test_secret_isolated_from_agent(temp_app_paths):
     gate = PathGate(temp_app_paths, store)
     decision = gate.authorize(temp_app_paths.secrets_dir / "secrets.json", Access.READ)
     assert decision.kind == DecisionKind.DENY
+
+
+def _registry_with_vault(paths):
+    """Registry wired to a real vault so secret references can resolve."""
+    store = Store(paths.db_path)
+    vault = SecretsVault(paths.secrets_dir)
+    return CapabilityRegistry(paths, store, PathGate(paths, store), vault), store, vault
+
+
+async def test_custom_tool_receives_injected_secret(temp_app_paths):
+    """A tool declaring SECRETS gets resolved values via `_secrets`, not via params."""
+    (temp_app_paths.tools / "needs_key.py").write_text(
+        'NAME = "needs_key"\nDESCRIPTION = "Uses a secret"\n'
+        'PARAMETERS = {"type": "object", "properties": {}}\n'
+        'SECRETS = {"API_KEY": "my_ref"}\n'
+        'def run(_secrets=None, **kw):\n    return "key=" + (_secrets or {}).get("API_KEY", "MISSING")\n',
+        encoding="utf-8",
+    )
+    registry, store, vault = _registry_with_vault(temp_app_paths)
+    vault.set("my_ref", "s3cr3t", owner="user")
+    registry.discover()
+    cap = store.list_capabilities(kind="tool")[0]
+    store.update_capability(cap["id"], enabled=True, trust_confirmed=True)
+    registry.discover()
+
+    async def _no_consent(path, access):
+        return False
+
+    result = await registry.invoke_tool("needs_key", {}, consent=_no_consent)
+    assert result.ok and result.output == "key=s3cr3t"
+    # The secret name/value is never part of the tool's advertised parameters.
+    spec = next(t for t in registry.enabled_tools() if t.name == "needs_key")
+    assert "s3cr3t" not in json.dumps(spec.parameters)
+
+
+def test_mcp_http_header_secret_resolved(temp_app_paths):
+    """An HTTP MCP server header `${secret:REF}` resolves via the vault at connect time."""
+    from lmstudioclaw.capabilities.mcp_client import McpServer
+
+    registry, _store, vault = _registry_with_vault(temp_app_paths)
+    vault.set("webiq_key", "abc123", owner="user")
+    server = McpServer(
+        name="WebIQ-MCP", url="https://api.example/mcp", type="http",
+        headers={"x-apikey": "${secret:webiq_key}"},
+    )
+    live = registry._resolve_secrets(server)
+    assert live.headers["x-apikey"] == "abc123"
+    # The original server entry is untouched (no resolved value persisted).
+    assert server.headers["x-apikey"] == "${secret:webiq_key}"
+
+
+def test_flatten_taskgroup_error_surfaces_cause():
+    """ExceptionGroup (anyio TaskGroup) is flattened to the concrete inner message."""
+    from lmstudioclaw.capabilities.mcp_client import _flatten_error
+
+    try:
+        grp = ExceptionGroup("unhandled errors in a TaskGroup",
+                             [ConnectionRefusedError("nope")])
+    except TypeError:  # Python < 3.11 has no built-in ExceptionGroup
+        return
+    msg = _flatten_error(grp)
+    assert "ConnectionRefusedError" in msg and "nope" in msg
+    assert "TaskGroup" not in msg
+
+
+def test_capability_metadata_persists_mcp_tools(temp_app_paths):
+    """An MCP capability row round-trips a ``metadata`` blob (the per-tool list)."""
+    store = Store(temp_app_paths.db_path)
+    store.upsert_capability({
+        "kind": "mcp", "name": "webiq", "description": "MCP server 'webiq'",
+        "status": "valid",
+        "metadata": {"tools": [{"name": "browse", "description": "Fetch a page"}]},
+    })
+    row = store.get_capability_by_kind_name("mcp", "webiq")
+    # list_capabilities decodes metadata JSON back into a dict.
+    cap = next(c for c in store.list_capabilities("mcp") if c["id"] == row["id"])
+    assert cap["metadata"]["tools"][0]["name"] == "browse"
+    # A later upsert without metadata must not wipe the stored tools.
+    store.upsert_capability({"kind": "mcp", "name": "webiq",
+                             "description": "MCP server 'webiq'", "status": "valid"})
+    cap2 = next(c for c in store.list_capabilities("mcp") if c["id"] == row["id"])
+    assert cap2["metadata"]["tools"][0]["name"] == "browse"

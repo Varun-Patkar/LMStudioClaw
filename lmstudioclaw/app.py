@@ -52,7 +52,7 @@ class Controller:
         self.lifecycle = ModelLifecycle(self.http, self.connection)
 
         self.gate = PathGate(self.paths, self.store)
-        self.registry = CapabilityRegistry(self.paths, self.store, self.gate)
+        self.registry = CapabilityRegistry(self.paths, self.store, self.gate, self.vault)
         self.engine = Engine(
             self.store, self.registry, self.connection.openai_base, self.connection.api_key
         )
@@ -284,6 +284,46 @@ class Controller:
             "(exact-string find/replace, or a line range) and `write_file` to create or "
             "overwrite. Use `parallel` only for independent operations — never for two "
             "edits to the same file."
+        )
+        # Environment map: where the agent's home + key config files live, so the agent
+        # goes straight to them instead of probing drives (no consent needed here —
+        # the whole home folder is implicitly allowed).
+        parts.append(
+            "\n## Environment\n"
+            f"Your home folder is `{self.paths.base}` and everything under it is "
+            "directly accessible (no permission prompt). It contains: `skills/` "
+            "(SKILL.md folders), `tools/` (custom Python tools), `workspace/` (your "
+            "read/write playground), `memory/` (durable learnings), and `mcp.json`.\n"
+            f"MCP servers are configured in `{self.paths.mcp_json}`. Edit it to add or "
+            "change servers; it uses the standard MCP config format:\n"
+            "```json\n"
+            "{\n"
+            '  "mcpServers": {\n'
+            '    "stdio-example": { "command": "npx", "args": ["-y", "server-pkg"], '
+            '"env": { "KEY": "value" } },\n'
+            '    "http-example": { "type": "http", "url": "https://host/mcp", '
+            '"headers": { "Authorization": "Bearer <token>" } }\n'
+            "  }\n"
+            "}\n"
+            "```\n"
+            "Use `type` `\"http\"` (Streamable HTTP) or `\"sse\"` for remote servers and "
+            "put auth keys in `headers`; omit `type` for local `command`-based servers. "
+            "Split the executable from its arguments: `command` is just the program "
+            "(e.g. `\"npx\"`) and every flag/package goes in the `args` array (e.g. "
+            "`[\"-y\", \"@scope/pkg\", \"--flag\"]`) — never put arguments inside `command`. "
+            "For a secret value (API key/token), do NOT hardcode it: reference it as "
+            "`\"${secret:REF_NAME}\"` in an `env` or `headers` value, choosing a concrete, "
+            "descriptive REF_NAME yourself (e.g. `${secret:WEBIQ_API_KEY}`) — never leave "
+            "the literal text `REF_NAME`. After you save the file, the Skills & Tools page "
+            "automatically prompts the user to enter that secret's value (write-only); you "
+            "never see it. Tell the user which secret name to fill in. The value is resolved "
+            "only at connect time and never exposed.\n"
+            "Secrets work the same way for capabilities you author: a custom tool in "
+            "`tools/` may declare `SECRETS = {\"ENV_VAR\": \"REF_NAME\"}` (or a list of ref "
+            "names) and receives the resolved values via a reserved `_secrets` keyword "
+            "argument; a skill may list `secrets:` in its SKILL.md front-matter and its "
+            "scripts get them as environment variables. You never see the values — only "
+            "the user can set them in the Secrets UI."
         )
         for skill in self.registry.enabled_skills():
             parts.append(f"\n## Skill: {skill.name}\n{skill.instructions}")

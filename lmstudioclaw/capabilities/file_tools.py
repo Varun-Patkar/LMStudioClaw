@@ -25,6 +25,8 @@ from .registry import ToolResult
 # Bound tool output so a single call can never flood the transcript / context.
 _MAX_OUTPUT = 50_000
 _MAX_MATCHES = 200
+# Bound the before/after snapshots sent to the UI for the diff view (display-only).
+_MAX_DIFF_CHARS = 20_000
 
 
 async def authorize(gate, path: str, access: Access, consent) -> "Path | str":
@@ -75,15 +77,17 @@ async def read_file(gate, consent, *, path: str,
         text = resolved.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         return ToolResult(False, "", error=f"Read failed: {exc}")
+    meta = {"action": "read", "path": str(resolved), "name": resolved.name,
+            "start_line": start_line, "end_line": end_line}
     if start_line is None and end_line is None:
-        return ToolResult(True, text[:_MAX_OUTPUT])
+        return ToolResult(True, text[:_MAX_OUTPUT], meta=meta)
     lines = text.splitlines()
     lo = max(1, start_line or 1)
     hi = min(len(lines), end_line or len(lines))
     if lo > hi:
         return ToolResult(False, "", error=f"Invalid range: {lo}-{hi} (file has {len(lines)} lines)")
     chunk = "\n".join(lines[lo - 1:hi])
-    return ToolResult(True, chunk[:_MAX_OUTPUT])
+    return ToolResult(True, chunk[:_MAX_OUTPUT], meta=meta)
 
 
 async def list_dir(gate, consent, *, path: str) -> ToolResult:
@@ -93,7 +97,9 @@ async def list_dir(gate, consent, *, path: str) -> ToolResult:
         return ToolResult(False, "", error=resolved)
     try:
         entries = sorted(f"{p.name}/" if p.is_dir() else p.name for p in resolved.iterdir())
-        return ToolResult(True, "\n".join(entries) or "(empty)")
+        meta = {"action": "list", "path": str(resolved), "name": resolved.name,
+                "count": len(entries)}
+        return ToolResult(True, "\n".join(entries) or "(empty)", meta=meta)
     except OSError as exc:
         return ToolResult(False, "", error=f"List failed: {exc}")
 
@@ -103,9 +109,20 @@ async def write_file(gate, consent, *, path: str, content: str) -> ToolResult:
     resolved = await authorize(gate, path, Access.READ_WRITE, consent)
     if isinstance(resolved, str):
         return ToolResult(False, "", error=resolved)
+    # Snapshot prior content (if any) so the UI can show a create-vs-overwrite diff.
+    existed = resolved.exists()
+    old = ""
+    if existed:
+        try:
+            old = resolved.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            old = ""
     try:
         _atomic_write(resolved, content)
-        return ToolResult(True, f"Wrote {len(content)} chars to {resolved}")
+        meta = {"action": "overwrite" if existed else "create",
+                "path": str(resolved), "name": resolved.name,
+                "old": old[:_MAX_DIFF_CHARS], "new": content[:_MAX_DIFF_CHARS]}
+        return ToolResult(True, f"Wrote {len(content)} chars to {resolved}", meta=meta)
     except OSError as exc:
         return ToolResult(False, "", error=f"Write failed: {exc}")
 
@@ -156,7 +173,9 @@ async def edit(gate, consent, *, path: str,
         _atomic_write(resolved, updated)
     except OSError as exc:
         return ToolResult(False, "", error=f"Write failed: {exc}")
-    return ToolResult(True, f"Edited {resolved}")
+    meta = {"action": "edit", "path": str(resolved), "name": resolved.name,
+            "old": text[:_MAX_DIFF_CHARS], "new": updated[:_MAX_DIFF_CHARS]}
+    return ToolResult(True, f"Edited {resolved}", meta=meta)
 
 
 def _base_dir(gate, path: str | None) -> str:

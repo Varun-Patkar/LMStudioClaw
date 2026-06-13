@@ -41,9 +41,9 @@ lmstudioclaw/
 │   ├── parallel_tool.py    # parallel meta-tool: run >=2 independent sub-calls concurrently (002)
 │   ├── skills.py           # SKILL.md discovery/validation + referenced scripts
 │   ├── tools.py            # custom python tools (trust gate, in-process exec)
-│   └── mcp_client.py       # MCP servers via the `mcp` SDK (isolated short-lived sessions)
+│   └── mcp_client.py       # MCP servers (stdio + HTTP/SSE w/ auth headers) via `mcp` SDK
 ├── consent/
-│   └── path_gate.py        # canonicalize + hierarchical grant check + hard deny-list
+│   └── path_gate.py        # canonicalize + workspace/home allow + hierarchical grant + hard deny-list
 ├── automations/
 │   └── scheduler.py        # event-driven Daily/Interval scheduler + missed-run detection
 ├── sessions/
@@ -57,7 +57,7 @@ lmstudioclaw/
 │   ├── api.py              # FastAPI app factory + static SPA mount + /ws/status + health
 │   ├── ws.py               # session hub + StatusHub (app-wide live model/run/queue) (002)
 │   ├── routes_*.py         # REST route groups (sessions, automations, capabilities, settings)
-│   └── static/             # vanilla-JS SPA: fluid ~90vw layout, runbar + queue panel (002)
+│   └── static/             # built React SPA (from frontend/): fluid ~90vw, runbar + queue panel (002)
 └── tray/
     └── icon.py             # pystray tray: Open (browser) / Quit (graceful shutdown)
 ```
@@ -83,6 +83,30 @@ lmstudioclaw/
   indicator + collapsible queue panel (`static/views/runbar.js`), uses a fluid ~90vw
   layout, and gives non-blocking "Load model" feedback. The status channel replays a
   full snapshot on (re)connect so the UI recovers after a dropped channel.
+- **MCP transports** (`capabilities/mcp_client.py`): servers in `mcp.json` use the
+  standard config shape. Local servers use `command`/`args`/`env` (stdio); remote
+  servers use `type` (`"http"` Streamable HTTP or `"sse"`) + `url` + optional auth
+  `headers` (e.g. `Authorization: Bearer …`). `McpServer.transport` resolves the
+  effective transport and `_with_session` routes to the stdio/streamable-HTTP/SSE
+  client. Auth keys live only in `headers` and are never logged. `env`/`headers` values
+  may be `"${secret:REF_NAME}"`; `CapabilityRegistry._resolve_secrets` swaps them for the
+  stored value via the vault at connect time only (never persisted resolved, never shown).
+- **Implicit home consent** (`consent/path_gate.py`): the whole
+  `Documents/LMStudioClaw` home (skills/tools/workspace/memory/`mcp.json`) is allowed
+  without a prompt — the deny-list (secrets + app internals) is evaluated first and
+  still wins. The agent's system prompt advertises the home layout + `mcp.json`
+  location and format so it edits config directly instead of probing drives.
+- **Tool-action UI** (`ToolResult.meta` → `tool_result` event → `components/ToolCard.jsx`):
+  file tools attach display-only `meta` (action + before/after snapshots). The
+  transcript renders each action as a readable card ("Read X", "Created Y",
+  "Edited Z  +n −m") with an expandable side-by-side diff for writes/edits, full
+  contents for a new file, and a note for deletions. `meta` never enters the model
+  context (only `output` does); diff rendering lives in `frontend/src/lib/diff.js`.
+  Tool turns are persisted and rebuilt into cards on reload (`SessionDetail.restoreMessages`).
+- **Session snapshot replay** (`web/ws.py` `SessionHub`): each channel caches the last
+  `budget` event + working/idle (`turn`) state and replays them to a socket on
+  (re)connect, so a reloaded mid-run session shows the token gauge and correct Stop-turn
+  state immediately (no `0/0` until the next turn).
 
 ## Control flow (a session)
 
@@ -106,7 +130,8 @@ lmstudioclaw/
   and lifecycle (reused from the original app).
 - **LM Studio OpenAI-compatible API** (`/v1`) via the `openai` async client — chat
   streaming + tool calling and compaction summaries.
-- **MCP servers** via the official `mcp` SDK — external tools.
+- **MCP servers** via the official `mcp` SDK — external tools over stdio or HTTP/SSE
+  (auth keys carried in request headers).
 - **VS Code** via the `code` CLI — `POST /api/open-in-vscode` opens referenced files.
 
 ## Invariants
@@ -114,9 +139,13 @@ lmstudioclaw/
 - **At most one model loaded** (single-active FIFO queue); idle = zero models.
 - **Every terminal session unloads the model.**
 - **All agent file I/O passes the `PathGate`**; the secrets area and app internals are a
-  hard deny-list regardless of grants; workspace is always allowed; grants are
-  hierarchical and least-privilege (read ≠ write).
+  hard deny-list regardless of grants; the workspace and the `Documents/LMStudioClaw`
+  home are always allowed (no prompt); other grants are hierarchical and least-privilege
+  (read ≠ write).
 - **Secrets never reach the agent** — no `get_value` is exposed; only runtime `inject`.
+  A stored secret can be used by MCP servers (`${secret:REF}` in `env`/`headers`), custom
+  tools (module `SECRETS` → `_secrets` kwarg), and skills (front-matter `secrets:` → script
+  env vars), all resolved via `CapabilityRegistry._secret_env`/`_resolve_secrets`.
 - **No idle polling** of LM Studio; the scheduler sleeps until the next fire.
 - **Best-effort persistence** — storage hiccups never crash the controller.
 
@@ -124,7 +153,8 @@ lmstudioclaw/
 
 - **Skills**: drop a `SKILL.md` folder under `Documents/LMStudioClaw/skills/`.
 - **Custom tools**: drop a `.py` module under `tools/` (requires trust confirmation).
-- **MCP servers**: add an entry to `mcp.json` (or via the UI / agent).
+- **MCP servers**: add an entry to `mcp.json` (or via the UI / agent) — stdio
+  (`command`/`args`/`env`) or HTTP (`type`/`url`/`headers` for auth).
 - **Personas**: managed in Settings; the default is editable but not deletable.
 
 Adding any capability only touches its files plus a registry row — no other module changes.

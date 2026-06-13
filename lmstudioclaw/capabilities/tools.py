@@ -31,6 +31,7 @@ class ToolModule:
     source_path: str
     valid: bool = True
     error: str | None = None
+    secrets: Any = None  # optional SECRETS: list[ref] or {ENV_VAR: ref}
 
 
 def _load_module(path: Path):
@@ -57,7 +58,9 @@ def load_tool(path: Path) -> ToolModule:
     if not callable(run):
         return ToolModule(name, description, parameters, lambda **_: None, str(path),
                           valid=False, error="Module has no callable 'run'")
-    return ToolModule(name, description, parameters, run, str(path), valid=True)
+    secrets = getattr(module, "SECRETS", None)
+    return ToolModule(name, description, parameters, run, str(path), valid=True,
+                      secrets=secrets)
 
 
 def discover_tools(tools_dir: Path) -> list[ToolModule]:
