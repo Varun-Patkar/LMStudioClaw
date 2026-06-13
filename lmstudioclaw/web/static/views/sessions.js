@@ -120,10 +120,7 @@ async function renderSessionDetail(root, sessionId) {
   const session = await get(`/api/sessions/${sessionId}`);
   const terminal = ["completed", "failed", "stopped"].includes(session.status);
   const statusBadge = el("span", { class: "badge " + session.status }, session.status);
-  const budgetFill = el("div", { style: "width:0%" });
   const ctxTotal = session.context_length || 0;
-  const budgetLabel = el("span", { class: "muted" },
-    ctxTotal ? `0 / ${ctxTotal} tokens (0%)` : "Token usage will appear here");
   const transcript = el("div", { class: "transcript" });
   const consentArea = el("div", {});
 
@@ -163,7 +160,8 @@ async function renderSessionDetail(root, sessionId) {
   }
 
   const input = el("textarea", { placeholder: "Message…  (Enter = steer / send, Alt+Enter = queue)" });
-  const ws = openSocket(sessionId, { statusBadge, budgetFill, budgetLabel, transcript, consentArea });
+  const gauge = tokenGauge(ctxTotal);
+  const ws = openSocket(sessionId, { statusBadge, gauge, transcript, consentArea });
 
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -181,8 +179,8 @@ async function renderSessionDetail(root, sessionId) {
 
   root.append(
     el("div", { class: "card" },
-      el("div", { class: "row" }, backBtn, el("h2", {}, "Session"), statusBadge, el("span", { class: "spacer" }), stopTurn, endBtn),
-      el("div", { class: "budget-bar" }, budgetFill), budgetLabel,
+      el("div", { class: "row" }, backBtn, el("h2", {}, "Session"), statusBadge,
+        el("span", { class: "spacer" }), gauge.element, stopTurn, endBtn),
       consentArea,
       transcript,
       el("div", { class: "composer" }, input)),
@@ -214,6 +212,53 @@ async function automationPanel(automationId) {
 
 let isGenerating = false;
 
+/**
+ * A circular token gauge that fills as context is used, with a hover tooltip showing
+ * the usage breakdown (used/total, %, compaction limit, per-role split). Returns
+ * `{ element, update(evt) }` where `evt` is a `budget` event from the engine.
+ */
+function tokenGauge(ctxTotal) {
+  const R = 13, C = 2 * Math.PI * R;
+  const track = svgEl("circle", { cx: 16, cy: 16, r: R, class: "gauge-track" });
+  const fill = svgEl("circle", {
+    cx: 16, cy: 16, r: R, class: "gauge-fill",
+    "stroke-dasharray": C.toFixed(1), "stroke-dashoffset": C.toFixed(1),
+    transform: "rotate(-90 16 16)",
+  });
+  const pctText = svgEl("text", { x: 16, y: 16, class: "gauge-text" }, "0%");
+  const svg = svgEl("svg", { viewBox: "0 0 32 32", class: "token-gauge", width: 32, height: 32 },
+    track, fill, pctText);
+  const tip = el("div", { class: "gauge-tip" }, "Token usage will appear here");
+  const element = el("div", { class: "gauge-wrap", title: "" }, svg, tip);
+
+  function update(evt) {
+    const total = evt.total || ctxTotal || 0;
+    const used = evt.used || 0;
+    const frac = total ? Math.min(1, used / total) : 0;
+    const pct = Math.round(frac * 100);
+    fill.setAttribute("stroke-dashoffset", (C * (1 - frac)).toFixed(1));
+    fill.classList.toggle("warn", evt.threshold && frac >= evt.threshold);
+    pctText.textContent = pct + "%";
+    const b = evt.breakdown || {};
+    const rows = ["system", "user", "assistant", "tool"]
+      .filter((k) => b[k])
+      .map((k) => `<div class="grow"><span>${k}</span><span>${b[k].toLocaleString()}</span></div>`)
+      .join("");
+    const limit = evt.limit ? `<div class="grow muted"><span>compaction at</span><span>${evt.limit.toLocaleString()}</span></div>` : "";
+    tip.innerHTML =
+      `<div class="grow ghead"><span>${used.toLocaleString()} / ${total.toLocaleString()}</span><span>${pct}%</span></div>${rows}${limit}`;
+  }
+  return { element, update };
+}
+
+/** Create an SVG element with attributes + children (namespaced). */
+function svgEl(tag, attrs = {}, ...children) {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+  for (const c of children) node.append(c.nodeType ? c : document.createTextNode(String(c)));
+  return node;
+}
+
 /** Open the session WebSocket and wire incoming events to the UI. */
 function openSocket(sessionId, ui) {
   const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -242,12 +287,9 @@ function openSocket(sessionId, ui) {
       case "tool_result":
         ui.transcript.append(el("div", { class: "msg tool" }, `→ ${evt.ok ? "ok" : "error"}: ${evt.summary || ""}`));
         break;
-      case "budget": {
-        const pct = Math.min(100, Math.round((evt.used / evt.total) * 100));
-        ui.budgetFill.style.width = pct + "%";
-        ui.budgetLabel.textContent = `${evt.used} / ${evt.total} tokens (${pct}%)`;
+      case "budget":
+        ui.gauge.update(evt);
         break;
-      }
       case "compaction":
         ui.transcript.append(el("div", { class: "msg system" }, `Context compacted: ${evt.tokens_before} → ${evt.tokens_after} tokens`));
         currentAssistant = null;

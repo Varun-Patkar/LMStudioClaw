@@ -238,6 +238,27 @@ tbody tr:hover { background: var(--bg-elev-2); }
 .budget-bar { height: 6px; background: var(--bg-input); border-radius: 3px; overflow: hidden; margin: 8px 0; }
 .budget-bar > div { height: 100%; background: var(--accent); transition: width .2s; }
 
+/* ── Circular token gauge (beside Stop turn) ──────────────────────────── */
+.gauge-wrap { position: relative; display: inline-flex; align-items: center; }
+.token-gauge { display: block; cursor: default; }
+.gauge-track { fill: none; stroke: var(--bg-input); stroke-width: 4; }
+.gauge-fill { fill: none; stroke: var(--accent); stroke-width: 4; stroke-linecap: round; transition: stroke-dashoffset .35s ease, stroke .2s; }
+.gauge-fill.warn { stroke: var(--amber); }
+.gauge-text { fill: var(--fg-dim); font-size: 9px; font-weight: 700; text-anchor: middle; dominant-baseline: central; }
+.gauge-tip {
+  position: absolute; top: calc(100% + 8px); right: 0; z-index: 40;
+  min-width: 200px; padding: var(--s3); border-radius: var(--radius-sm);
+  background: var(--bg-elev); border: 1px solid var(--border); box-shadow: var(--shadow-pop);
+  font-size: 12px; opacity: 0; visibility: hidden; transform: translateY(-4px);
+  transition: opacity var(--transition), transform var(--transition), visibility var(--transition);
+  pointer-events: none;
+}
+.gauge-wrap:hover .gauge-tip { opacity: 1; visibility: visible; transform: none; }
+.gauge-tip .grow { display: flex; justify-content: space-between; gap: var(--s4); padding: 2px 0; }
+.gauge-tip .grow span:first-child { color: var(--fg-dim); text-transform: capitalize; }
+.gauge-tip .ghead { font-weight: 700; border-bottom: 1px solid var(--border); margin-bottom: var(--s1); padding-bottom: var(--s2); }
+.gauge-tip .ghead span:first-child { color: var(--fg); text-transform: none; }
+
 .consent {
   background: var(--amber);
   color: #1b1f24;

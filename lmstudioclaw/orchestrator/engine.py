@@ -132,8 +132,7 @@ class Engine:
         # Emit an initial budget so the token counter shows immediately, not only
         # while a turn is processing.
         budget.used = budget_mod.estimate_messages(messages)
-        await on_event({"type": "budget", "used": budget.used, "total": budget.total,
-                        "threshold": budget.threshold})
+        await on_event(self._budget_event(budget, messages))
 
         if run_config is not None:
             _tools, warnings = self._registry.effective_tools(run_config)
@@ -204,11 +203,33 @@ class Engine:
                 if not task.done():
                     task.cancel()
 
+    @staticmethod
+    def _budget_event(budget, messages: list[dict]) -> dict:
+        """Build a ``budget`` event including a per-role usage breakdown.
+
+        Attributes current usage to ``system`` (persona + skills + memory), ``user``,
+        ``assistant``, and ``tool`` messages so the UI can show what is consuming the
+        context window on hover.
+        """
+        breakdown = {"system": 0, "user": 0, "assistant": 0, "tool": 0}
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content") or ""
+            if isinstance(content, list):
+                content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
+            tokens = budget_mod.estimate_tokens(str(content)) + 4
+            key = role if role in breakdown else ("system" if role == "steer" else "user")
+            breakdown[key] = breakdown.get(key, 0) + tokens
+        return {
+            "type": "budget", "used": budget.used, "total": budget.total,
+            "threshold": budget.threshold, "limit": budget.limit,
+            "breakdown": breakdown,
+        }
+
     async def _maybe_compact(self, session_id, messages, model_id, budget, on_event):
         """Compact older turns when usage crosses the threshold (FR-061)."""
         budget.used = budget_mod.estimate_messages(messages)
-        await on_event({"type": "budget", "used": budget.used, "total": budget.total,
-                        "threshold": budget.threshold})
+        await on_event(self._budget_event(budget, messages))
         if not budget_mod.should_compact(budget):
             return messages, budget
         result = await compaction_mod.compact(messages, model=model_id, client=self._client)
