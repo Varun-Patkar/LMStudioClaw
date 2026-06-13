@@ -1,19 +1,43 @@
-// Settings, model management, and personas view (US7).
-import { get, post, patch, del, el, toast } from "../api.js";
+// Settings, model management, personas, and folder permissions view (US7/US2).
+import { get, post, patch, del, el, toast, rerender } from "../api.js";
 
 /** Render the Settings view with all configuration sections. */
 export async function renderSettings(root) {
-  const [settings, modelsResp, personas] = await Promise.all([
+  const [settings, modelsResp, personas, grants] = await Promise.all([
     get("/api/settings"),
     get("/api/models").catch(() => ({ models: [], connected: false })),
     get("/api/personas").catch(() => []),
+    get("/api/grants").catch(() => []),
   ]);
   root.append(
     generalCard(settings, modelsResp.models),
     timeoutsCard(settings),
+    permissionsCard(grants),
     personasCard(personas, root),
     advancedCard(modelsResp, root),
   );
+}
+
+/** Folder permissions (consent grants) — managed from Settings (issue 5). */
+function permissionsCard(grants) {
+  const body = grants.length
+    ? el("table", {},
+        el("thead", {}, el("tr", {},
+          el("th", {}, "Folder"), el("th", {}, "Scope"),
+          el("th", {}, "Access"), el("th", {}, ""))),
+        el("tbody", {}, ...grants.map((g) =>
+          el("tr", {},
+            el("td", {}, el("code", {}, g.path)),
+            el("td", {}, g.scope),
+            el("td", {}, g.access),
+            el("td", {}, el("button", {
+              class: "btn red", onclick: async () => {
+                try { await del(`/api/grants/${g.id}`); toast("Revoked."); rerender(); }
+                catch (e) { toast(e.message); }
+              },
+            }, "Revoke"))))))
+    : el("p", { class: "muted" }, "No folder grants. The agent may use the workspace by default; it will ask before accessing anything else.");
+  return el("div", { class: "card" }, el("h2", {}, "Folder permissions"), body);
 }
 
 /** General settings: theme, default model, startup, notifications. */
@@ -70,8 +94,7 @@ function personasCard(personas, root) {
       catch (e) { toast(e.message); }
     } }, "Save");
     const delBtn = p.is_default ? null : el("button", { class: "btn red", onclick: async () => {
-      try { await del(`/api/personas/${p.id}`); } catch (e) { toast(e.message); }
-      root.innerHTML = ""; renderSettings(root);
+      try { await del(`/api/personas/${p.id}`); rerender(); } catch (e) { toast(e.message); }
     } }, "Delete");
     return el("div", { class: "card" },
       el("div", { class: "row" }, el("strong", {}, p.name),
@@ -83,9 +106,8 @@ function personasCard(personas, root) {
   const newInstr = el("textarea", { placeholder: "Instructions" });
   const createBtn = el("button", { class: "btn green", onclick: async () => {
     if (!newName.value.trim()) return;
-    try { await post("/api/personas", { name: newName.value.trim(), instructions: newInstr.value }); }
+    try { await post("/api/personas", { name: newName.value.trim(), instructions: newInstr.value }); rerender(); }
     catch (e) { toast(e.message); }
-    root.innerHTML = ""; renderSettings(root);
   } }, "Create persona");
 
   return el("div", { class: "card" }, el("h2", {}, "Personas"), ...rows,
@@ -129,8 +151,7 @@ function advancedCard(modelsResp, root) {
 
 /** Re-render the whole Settings view (used after a load/unload to refresh state). */
 function reloadSettings(root) {
-  root.innerHTML = "";
-  renderSettings(root);
+  rerender();
 }
 
 // -- helpers ----------------------------------------------------------------

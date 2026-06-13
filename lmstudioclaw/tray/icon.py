@@ -52,7 +52,7 @@ class Tray:
         if pystray is None or Image is None:
             return False
         menu = pystray.Menu(
-            pystray.MenuItem("Open Control Panel", self._open, default=True),
+            pystray.MenuItem("Open LMStudioClaw", self._open, default=True),
             pystray.MenuItem("Quit", self._quit),
         )
         self._icon = pystray.Icon(

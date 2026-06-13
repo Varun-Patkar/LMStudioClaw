@@ -73,6 +73,45 @@ async def get_session(session_id: str, request: Request) -> dict:
     }
 
 
+@router.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: str, request: Request) -> dict:
+    """Delete a non-active session and its transcript (US3)."""
+    ctrl = _ctrl(request)
+    session = ctrl.store.get_session(session_id)
+    if session is None:
+        raise HTTPException(404, "Session not found")
+    if session.get("status") in ("loading", "active"):
+        raise HTTPException(409, "Cannot delete an active session; end it first.")
+    ctrl.store.delete_session(session_id)
+    return {"ok": True}
+
+
+@router.post("/api/sessions/{session_id}/restart")
+async def restart_session(session_id: str, payload: SessionStart, request: Request) -> dict:
+    """Start a fresh session, optionally reusing the prior session's run config (US3/US4).
+
+    The body may override the model / run config; when omitted, the original session's
+    saved run config is reused so a stopped session can be relaunched with the same
+    settings (FR-026/FR-030b).
+    """
+    ctrl = _ctrl(request)
+    prior = ctrl.store.get_session(session_id)
+    if prior is None:
+        raise HTTPException(404, "Session not found")
+    rc_dict = payload.run_config.model_dump() if payload.run_config else None
+    if rc_dict is None and prior.get("run_config"):
+        import json as _json
+        try:
+            rc_dict = _json.loads(prior["run_config"])
+        except (TypeError, ValueError):
+            rc_dict = None
+    rc = RunConfig.from_dict(rc_dict)
+    new_id, position = ctrl.start_manual_session(
+        model=payload.model, persona_id=payload.persona_id, run_config=rc,
+    )
+    return {"session_id": new_id, "queue_position": position}
+
+
 class StopIn(BaseModel):
     """Stop scope: a single turn or the whole session."""
 

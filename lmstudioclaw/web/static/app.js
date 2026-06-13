@@ -66,14 +66,15 @@ async function route() {
   const view = document.getElementById("view");
   view.innerHTML = "";
   view.append(loadingSkeleton());
+  // Build the view in a detached container so the page never flashes a half-built
+  // state, then swap it in atomically. Views fire "app:rerender" to refresh in place.
+  const container = document.createElement("div");
+  container.style.display = "contents";
   try {
-    const frag = document.createDocumentFragment();
-    await match.render(frag);
-    view.innerHTML = "";
-    view.append(frag);
+    await match.render(container);
+    view.replaceChildren(container);
   } catch (err) {
-    view.innerHTML = "";
-    view.append(Object.assign(document.createElement("div"), {
+    view.replaceChildren(Object.assign(document.createElement("div"), {
       className: "card", textContent: "Error: " + err.message,
     }));
   }
@@ -107,4 +108,6 @@ window.addEventListener("DOMContentLoaded", () => {
 });
 
 window.addEventListener("hashchange", route);
+// In-place refresh hook: views fire this after a mutation to re-render the current page.
+window.addEventListener("app:rerender", route);
 applyTheme().then(() => { route(); startStatus(); paintRunbar(); });

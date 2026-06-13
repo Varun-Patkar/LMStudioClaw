@@ -7,16 +7,17 @@ const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 /** Render the Automations view. */
 export async function renderAutomations(root) {
-  const [automations, personas, modelsResp] = await Promise.all([
+  const [automations, personas, modelsResp, settings] = await Promise.all([
     get("/api/automations"),
     get("/api/personas").catch(() => []),
     get("/api/models").catch(() => ({ models: [] })),
+    get("/api/settings").catch(() => ({})),
   ]);
-  root.append(await newAutomationCard(personas, modelsResp.models, root), listCard(automations, root));
+  root.append(await newAutomationCard(personas, modelsResp.models, settings.default_model, root), listCard(automations, root));
 }
 
 /** Build the create-automation form card. */
-async function newAutomationCard(personas, models, root) {
+async function newAutomationCard(personas, models, defaultModel, root) {
   const name = el("input", { placeholder: "Name" });
   const task = el("textarea", { placeholder: "Task / instruction for the agent" });
 
@@ -53,10 +54,10 @@ async function newAutomationCard(personas, models, root) {
     el("option", { value: "persistent" }, "Persistent session (resume)"));
   const personaSel = el("select", {},
     el("option", { value: "" }, "Default persona"),
-    ...personas.map((p) => el("option", { value: p.id }, p.name)));
+    ...personas.filter((p) => !p.is_default).map((p) => el("option", { value: p.id }, p.name)));
 
   // Per-run configuration saved with the automation and applied each run (US4).
-  const runConfig = await buildRunConfig(null, models);
+  const runConfig = await buildRunConfig(null, models, defaultModel);
 
   const createBtn = el("button", { class: "btn green", onclick: async () => {
     const body = {

@@ -92,6 +92,24 @@ def test_stop_unknown_session_404(client):
     assert resp.status_code == 404
 
 
+def test_delete_and_restart_session(client):
+    """Restart yields a new session; a non-active (queued) session can be deleted (US3)."""
+    # First session becomes active (the faked engine blocks waiting for a message).
+    active = client.post("/api/sessions", json={}).json()["session_id"]
+    # Second session is queued behind it (single-active FIFO).
+    queued = client.post("/api/sessions", json={}).json()["session_id"]
+    assert client.get(f"/api/sessions/{queued}").json()["status"] == "queued"
+    # Restart yields a new (different) session id.
+    r = client.post(f"/api/sessions/{active}/restart", json={})
+    assert r.status_code == 200 and r.json()["session_id"] != active
+    # A queued (non-active) session can be deleted.
+    d = client.delete(f"/api/sessions/{queued}")
+    assert d.status_code == 200
+    assert client.get(f"/api/sessions/{queued}").status_code == 404
+    # An active session cannot be deleted.
+    assert client.delete(f"/api/sessions/{active}").status_code == 409
+
+
 def test_websocket_receives_events(client):
     sid = client.post("/api/sessions", json={}).json()["session_id"]
     with client.websocket_connect(f"/ws/sessions/{sid}") as ws:

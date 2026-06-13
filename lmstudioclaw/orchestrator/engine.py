@@ -129,6 +129,12 @@ class Engine:
 
         await on_event({"type": "status", "status": "active"})
 
+        # Emit an initial budget so the token counter shows immediately, not only
+        # while a turn is processing.
+        budget.used = budget_mod.estimate_messages(messages)
+        await on_event({"type": "budget", "used": budget.used, "total": budget.total,
+                        "threshold": budget.threshold})
+
         if run_config is not None:
             _tools, warnings = self._registry.effective_tools(run_config)
             for warning in warnings:
@@ -173,14 +179,30 @@ class Engine:
     async def _next_message(
         self, control: SessionControl, idle_timeout: int, unattended: bool
     ) -> str | None:
-        """Wait for the next user message; return None on idle timeout."""
-        try:
-            kind, text = await asyncio.wait_for(control.inbox.get(), timeout=idle_timeout)
-            return text
-        except asyncio.TimeoutError:
-            # Unattended runs end when their queued work is done; interactive runs
-            # end on idle (FR-062 / idle unload).
+        """Wait for the next user message; return None on idle timeout or session stop.
+
+        Races the inbox against the ``stop_session`` event so ending a session takes
+        effect immediately (unloading the model and closing the run) instead of waiting
+        for the next message or the idle timeout.
+        """
+        if control.stop_session.is_set():
             return None
+        inbox_task = asyncio.ensure_future(control.inbox.get())
+        stop_task = asyncio.ensure_future(control.stop_session.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {inbox_task, stop_task}, timeout=idle_timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if inbox_task in done and stop_task not in done:
+                _kind, text = inbox_task.result()
+                return text
+            # stop_session fired, or idle timeout elapsed -> end the session.
+            return None
+        finally:
+            for task in (inbox_task, stop_task):
+                if not task.done():
+                    task.cancel()
 
     async def _maybe_compact(self, session_id, messages, model_id, budget, on_event):
         """Compact older turns when usage crosses the threshold (FR-061)."""

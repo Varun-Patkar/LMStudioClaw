@@ -24,6 +24,9 @@ export const patch = (p, b) => api("PATCH", p, b);
 export const del = (p) => api("DELETE", p);
 export const put = (p, b) => api("PUT", p, b);
 
+/** Re-render the current view in place (used after a mutation). */
+export const rerender = () => window.dispatchEvent(new Event("app:rerender"));
+
 /** Build a DOM element from a tag, attributes, and children. */
 export function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);

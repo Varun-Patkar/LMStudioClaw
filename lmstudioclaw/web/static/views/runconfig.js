@@ -9,32 +9,37 @@ import { get, el } from "../api.js";
  *
  * @param {object|null} initial  an existing run_config to pre-fill ({model, tool_overrides, mcp_selection})
  * @param {Array} models  the available models ([{key, display_name}])
+ * @param {string|null} defaultKey  the current default model key (named in the blank option, excluded below)
  * @returns {Promise<{element: HTMLElement, getConfig: function}>}
  *   `getConfig()` returns a run_config object, or null when nothing was customized.
  */
-export async function buildRunConfig(initial, models) {
+export async function buildRunConfig(initial, models, defaultKey) {
   const cfg = initial || {};
   let tools = { builtin: [], tools: [], mcp_servers: [] };
   try { tools = await get("/api/tools"); } catch { /* tools optional */ }
 
-  // Model selector (blank = default).
+  // Model selector — the blank option names the current default model and that model
+  // is excluded from the rest of the list (issue 7).
+  const def = models.find((m) => m.key === defaultKey);
   const modelSel = el("select", {},
-    el("option", { value: "" }, "Default model"),
-    ...models.map((m) => el("option", { value: m.key }, m.display_name || m.key)));
+    el("option", { value: "" }, def ? `Default model (${def.display_name})` : "Default model"),
+    ...models.filter((m) => m.key !== defaultKey)
+      .map((m) => el("option", { value: m.key }, m.display_name || m.key)));
   if (cfg.model) modelSel.value = cfg.model;
 
-  // Per-tool override checkboxes (tri-state collapsed to checked/unchecked; unchecked
-  // means "disabled for this run"). Default reflects the saved override or enabled.
+  // Default (built-in) tools are always available and CANNOT be deselected (issue 6):
+  // they render as checked + disabled. Only custom/MCP tools are toggleable per run.
   const overrides = cfg.tool_overrides || {};
-  const allTools = [
-    ...tools.builtin.map((t) => t.name),
-    ...tools.tools.map((t) => t.name),
-  ];
-  const toolBoxes = allTools.map((name) => {
+  const defaultBoxes = tools.builtin.map((t) => {
     const box = el("input", { type: "checkbox" });
-    box.checked = overrides[name] !== false; // default on unless explicitly disabled
-    box.dataset.tool = name;
-    return el("label", { class: "check" }, box, name);
+    box.checked = true; box.disabled = true; box.dataset.tool = t.name;
+    return el("label", { class: "check", title: "Default tool — always available" }, box, t.name);
+  });
+  const customBoxes = tools.tools.map((t) => {
+    const box = el("input", { type: "checkbox" });
+    box.checked = overrides[t.name] !== false;
+    box.dataset.tool = t.name;
+    return el("label", { class: "check" }, box, t.name);
   });
 
   // MCP server multi-select (none selected = all enabled by default).
@@ -48,8 +53,12 @@ export async function buildRunConfig(initial, models) {
   const element = el("details", { class: "run-config" },
     el("summary", {}, "Run configuration (model · tools · MCP)"),
     el("div", { class: "field" }, el("label", {}, "Model"), modelSel),
-    el("div", { class: "field" }, el("label", {}, "Tools (uncheck to disable for this run)"),
-      el("div", { class: "tool-grid" }, ...toolBoxes)),
+    el("div", { class: "field" }, el("label", {}, "Default tools (always on)"),
+      el("div", { class: "tool-grid" }, ...defaultBoxes)),
+    ...(customBoxes.length
+      ? [el("div", { class: "field" }, el("label", {}, "Custom tools (uncheck to disable for this run)"),
+          el("div", { class: "tool-grid" }, ...customBoxes))]
+      : []),
     ...(mcpBoxes.length
       ? [el("div", { class: "field" }, el("label", {}, "MCP servers for this run"),
           el("div", { class: "tool-grid" }, ...mcpBoxes))]
@@ -57,7 +66,7 @@ export async function buildRunConfig(initial, models) {
 
   function getConfig() {
     const tool_overrides = {};
-    for (const lbl of toolBoxes) {
+    for (const lbl of customBoxes) {
       const box = lbl.querySelector("input");
       if (!box.checked) tool_overrides[box.dataset.tool] = false; // only record disables
     }

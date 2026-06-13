@@ -333,6 +333,12 @@ class Store:
             "SELECT * FROM sessions WHERE status IN ('loading','active') LIMIT 1"
         )
 
+    def delete_session(self, session_id: str) -> None:
+        """Delete a session and its turns/compression events (best-effort)."""
+        self._exec("DELETE FROM turns WHERE session_id=?", (session_id,))
+        self._exec("DELETE FROM compression_events WHERE session_id=?", (session_id,))
+        self._exec("DELETE FROM sessions WHERE id=?", (session_id,))
+
     # -- Turns --------------------------------------------------------------
 
     def add_turn(
