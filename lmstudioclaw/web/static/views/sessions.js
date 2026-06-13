@@ -3,6 +3,7 @@
 // inline consent prompts (US1 + US3).
 import { get, post, del, el, toast, rerender } from "../api.js";
 import { buildRunConfig } from "./runconfig.js";
+import { renderMarkdown } from "./markdown.js";
 
 /** Render the Sessions list + new-session controls. */
 export async function renderSessions(root) {
@@ -127,7 +128,7 @@ async function renderSessionDetail(root, sessionId) {
   // Seed transcript from stored turns.
   for (const t of session.turns || []) {
     if (t.role === "user" || t.role === "assistant" || t.role === "system") {
-      transcript.append(el("div", { class: "msg " + t.role }, t.content || ""));
+      transcript.append(messageEl(t.role, t.content || ""));
     }
   }
 
@@ -161,7 +162,38 @@ async function renderSessionDetail(root, sessionId) {
 
   const input = el("textarea", { placeholder: "Message…  (Enter = steer / send, Alt+Enter = queue)" });
   const gauge = tokenGauge(ctxTotal);
-  const ws = openSocket(sessionId, { statusBadge, gauge, transcript, consentArea });
+  const composer = el("div", { class: "composer" }, input);
+  const ended = el("div", { class: "muted", style: "display:none" },
+    "Session ended. Reopen the Sessions list to restart it.");
+  const stopTurn = el("button", { class: "btn", onclick: () => ws.send(JSON.stringify({ type: "stop", scope: "turn" })) }, "Stop turn");
+  const endBtn = el("button", { class: "btn red" }, "End session");
+
+  const ui = {
+    statusBadge, gauge, transcript, consentArea,
+    onEnded: (status) => {
+      // Live transition to a finished session: lock the composer, swap controls.
+      input.disabled = true;
+      composer.style.display = "none";
+      ended.style.display = "";
+      stopTurn.style.display = "none";
+      endBtn.textContent = "Closed";
+      endBtn.disabled = true;
+      statusBadge.textContent = status;
+      statusBadge.className = "badge " + status;
+      toast(`Session ${status}.`);
+      // Offer a quick restart that continues this conversation.
+      ended.innerHTML = "";
+      ended.append(
+        document.createTextNode("Session ended. "),
+        el("button", { class: "btn", onclick: async () => {
+          try {
+            const res = await post(`/api/sessions/${sessionId}/restart`, {});
+            location.hash = `sessions/detail/${res.session_id}`;
+          } catch (e) { toast(e.message); }
+        } }, "Restart & continue"));
+    },
+  };
+  const ws = openSocket(sessionId, ui);
 
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -174,8 +206,13 @@ async function renderSessionDetail(root, sessionId) {
     }
   });
 
-  const stopTurn = el("button", { class: "btn", onclick: () => ws.send(JSON.stringify({ type: "stop", scope: "turn" })) }, "Stop turn");
-  const endBtn = el("button", { class: "btn red", onclick: () => ws.send(JSON.stringify({ type: "stop", scope: "session" })) }, "End session");
+  endBtn.addEventListener("click", () => {
+    endBtn.disabled = true;
+    endBtn.innerHTML = "";
+    endBtn.append(el("span", { class: "spinner" }), document.createTextNode(" Ending…"));
+    try { ws.send(JSON.stringify({ type: "stop", scope: "session" })); }
+    catch (e) { toast(e.message); }
+  });
 
   root.append(
     el("div", { class: "card" },
@@ -183,7 +220,7 @@ async function renderSessionDetail(root, sessionId) {
         el("span", { class: "spacer" }), gauge.element, stopTurn, endBtn),
       consentArea,
       transcript,
-      el("div", { class: "composer" }, input)),
+      composer, ended),
   );
 
   // For an automation run, show its definition alongside, with an edit affordance (FR-022).
@@ -259,29 +296,55 @@ function svgEl(tag, attrs = {}, ...children) {
   return node;
 }
 
+/** Build a transcript message bubble — markdown for assistant/system, plain for user. */
+function messageEl(role, content) {
+  if (role === "assistant" || role === "system") {
+    const node = el("div", { class: "msg " + role });
+    node.innerHTML = renderMarkdown(content);
+    return node;
+  }
+  return el("div", { class: "msg " + role }, content);
+}
+
 /** Open the session WebSocket and wire incoming events to the UI. */
 function openSocket(sessionId, ui) {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/ws/sessions/${sessionId}`);
   let currentAssistant = null;
+  let currentRaw = "";
+
+  // Convert the streamed assistant bubble's plain text into rendered markdown once
+  // the turn finishes (any non-token event marks the boundary).
+  const finalize = () => {
+    if (currentAssistant) {
+      currentAssistant.innerHTML = renderMarkdown(currentRaw);
+      currentAssistant = null;
+      currentRaw = "";
+    }
+  };
 
   ws.onmessage = (ev) => {
     const evt = JSON.parse(ev.data);
+    if (evt.type !== "token") finalize();
     switch (evt.type) {
       case "status":
         ui.statusBadge.textContent = evt.status;
         ui.statusBadge.className = "badge " + evt.status;
         isGenerating = evt.status === "active";
+        // On a terminal status, reflect it live: lock input + show a notice.
+        if (["completed", "failed", "stopped"].includes(evt.status)) {
+          ui.onEnded && ui.onEnded(evt.status);
+        }
         break;
       case "token":
         if (!currentAssistant) {
           currentAssistant = el("div", { class: "msg assistant" }, "");
           ui.transcript.append(currentAssistant);
         }
-        currentAssistant.textContent += evt.text;
+        currentRaw += evt.text;
+        currentAssistant.textContent = currentRaw;  // fast plain text while streaming
         break;
       case "tool_call":
-        currentAssistant = null;
         ui.transcript.append(el("div", { class: "msg tool" }, `🔧 ${evt.name}(${JSON.stringify(evt.args)})`));
         break;
       case "tool_result":

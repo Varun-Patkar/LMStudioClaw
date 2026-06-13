@@ -88,11 +88,11 @@ async def delete_session(session_id: str, request: Request) -> dict:
 
 @router.post("/api/sessions/{session_id}/restart")
 async def restart_session(session_id: str, payload: SessionStart, request: Request) -> dict:
-    """Start a fresh session, optionally reusing the prior session's run config (US3/US4).
+    """Continue a finished session in a fresh run, carrying its transcript forward.
 
-    The body may override the model / run config; when omitted, the original session's
-    saved run config is reused so a stopped session can be relaunched with the same
-    settings (FR-026/FR-030b).
+    The prior conversation is resumed (turns copied + seeded as engine history) so the
+    agent continues with full context. The body may override the model / run config;
+    when omitted, the original session's saved run config is reused (FR-026/FR-030b).
     """
     ctrl = _ctrl(request)
     prior = ctrl.store.get_session(session_id)
@@ -108,6 +108,7 @@ async def restart_session(session_id: str, payload: SessionStart, request: Reque
     rc = RunConfig.from_dict(rc_dict)
     new_id, position = ctrl.start_manual_session(
         model=payload.model, persona_id=payload.persona_id, run_config=rc,
+        resume_session_id=session_id,
     )
     return {"session_id": new_id, "queue_position": position}
 

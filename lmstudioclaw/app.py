@@ -311,25 +311,37 @@ class Controller:
 
     def start_manual_session(
         self, *, model: str | None = None, persona_id: str | None = None,
-        run_config: "RunConfig | None" = None,
+        run_config: "RunConfig | None" = None, resume_session_id: str | None = None,
     ) -> tuple[str, int]:
         """Create and enqueue a manual interactive session. Returns (id, position).
 
         An optional ``run_config`` selects the model and per-run tool/MCP overrides for
         this run (FR-026); it is persisted with the session and the queued run so it
-        survives a restart (FR-025a/FR-030b).
+        survives a restart (FR-025a/FR-030b). When ``resume_session_id`` is given, the
+        prior session's conversation is carried forward: its turns are copied into the
+        new session (so the transcript shows) and seeded as engine history so the model
+        continues with full context.
         """
         chosen_model = (run_config.model if run_config and run_config.model else model)
         model_key, ctx = self._resolve_model(chosen_model)
         rc_dict = run_config.to_dict() if run_config else None
+        history = self._session_history(resume_session_id) if resume_session_id else None
         session_id = self.store.create_session(
             trigger_type="manual", model_key=model_key, persona_id=persona_id,
             session_mode="ephemeral", context_length=ctx, run_config=rc_dict,
         )
+        # Copy the prior transcript into the new session so the user sees the history.
+        if resume_session_id:
+            for turn in self.store.list_turns(resume_session_id):
+                if turn.get("role") in ("user", "assistant", "system") and turn.get("content"):
+                    self.store.add_turn(
+                        session_id, role=turn["role"], content=turn["content"],
+                        token_estimate=turn.get("token_estimate", 0),
+                    )
         self.hub.register(session_id)
         runner = self._make_runner(
             session_id, model_key=model_key, persona_id=persona_id, context_length=ctx,
-            unattended=False, initial_message=None, run_config=run_config,
+            unattended=False, initial_message=None, run_config=run_config, history=history,
         )
         position = self.queue.enqueue(
             session_id, runner,
@@ -454,6 +466,12 @@ class Controller:
 
             self._finish_notify(result, automation_id)
             self.store.prune(self.settings.retention_days)
+            # Tell the session view the run is over so the badge/controls update live
+            # (before the channel is torn down), then clear app-wide model status.
+            try:
+                await on_event({"type": "status", "status": result.status})
+            except Exception:
+                pass
             self.hub.unregister(session_id)
             self._set_model_status("idle", None)
             await self._broadcast_status()
