@@ -109,6 +109,7 @@ class Engine:
         unattended: bool = False,
         initial_message: str | None = None,
         history: list[dict] | None = None,
+        run_config=None,
     ) -> SessionResult:
         """Run the interactive loop until the session ends, stops, or fails.
 
@@ -127,6 +128,11 @@ class Engine:
         deadline = time.monotonic() + max_run_duration if max_run_duration > 0 else None
 
         await on_event({"type": "status", "status": "active"})
+
+        if run_config is not None:
+            _tools, warnings = self._registry.effective_tools(run_config)
+            for warning in warnings:
+                await on_event({"type": "warning", "message": warning})
 
         if initial_message:
             control.message(initial_message)
@@ -152,7 +158,7 @@ class Engine:
 
                 control.stop_turn.clear()
                 await self._run_turn(session_id, messages, model_id, budget, control, on_event,
-                                     unattended)
+                                     unattended, run_config)
 
                 if control.stop_session.is_set():
                     return SessionResult("stopped")
@@ -203,9 +209,13 @@ class Engine:
         return messages, budget
 
     async def _run_turn(self, session_id, messages, model_id, budget, control, on_event,
-                        unattended):
+                        unattended, run_config=None):
         """Run one assistant turn, resolving tool calls until a final answer."""
-        tools = [t.to_openai() for t in self._registry.enabled_tools()]
+        if run_config is not None:
+            specs, _warnings = self._registry.effective_tools(run_config)
+        else:
+            specs = self._registry.enabled_tools()
+        tools = [t.to_openai() for t in specs]
         for _ in range(_MAX_TOOL_ITERS):
             if control.stop_turn.is_set():
                 return

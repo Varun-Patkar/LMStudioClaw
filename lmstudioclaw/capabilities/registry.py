@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..consent.path_gate import Access, DecisionKind, PathGate
+from ..consent.path_gate import Access, PathGate
 
 # A consent callback: given (path, access) it returns True if access is granted.
 ConsentFn = Callable[[str, Access], Awaitable[bool]]
@@ -276,6 +276,68 @@ class CapabilityRegistry:
         """Return all callable tools: built-in filesystem + registered extras."""
         return [*self._builtin_tools(), *self._extra_tools.values()]
 
+    def mcp_server_names(self) -> list[str]:
+        """Return the names of MCP servers whose tools are currently registered.
+
+        MCP tools are namespaced ``"{server}__{tool}"`` (see :meth:`_wrap_mcp_tool`),
+        so the server is recoverable from the tool-name prefix. Used to scope a
+        per-run MCP selection (FR-030).
+        """
+        names: set[str] = set()
+        for name in self._extra_tools:
+            if "__" in name:
+                names.add(name.split("__", 1)[0])
+        return sorted(names)
+
+    def effective_tools(self, run_config=None) -> tuple[list[ToolSpec], list[str]]:
+        """Resolve the per-run effective toolset (most-granular-wins, FR-030a).
+
+        Resolution order, applied over the globally-enabled tools without ever
+        mutating global state (FR-028):
+
+        1. **MCP selection** (``run_config.mcp_selection``) decides which MCP servers
+           are active; MCP tools from de-selected servers are dropped (FR-030). A
+           ``None`` selection keeps all globally-enabled servers; ``[]`` drops all.
+        2. **Per-tool overrides** apply on top: a tool whose override is ``False`` is
+           removed (even if globally enabled); an override of ``True`` keeps a tool
+           that is present. Overrides referencing unknown tools, and selections
+           referencing unknown servers, are collected as warnings rather than failing
+           the run (FR-033).
+
+        Returns ``(tools, warnings)``. With no ``run_config`` this is exactly the
+        globally-enabled toolset and no warnings (FR-032).
+        """
+        tools = self.enabled_tools()
+        if run_config is None:
+            return tools, []
+
+        warnings: list[str] = []
+        known_servers = set(self.mcp_server_names())
+
+        # 1. MCP selection — scope active servers for this run only.
+        selection = getattr(run_config, "mcp_selection", None)
+        if selection is not None:
+            selected = set(selection)
+            for missing in selected - known_servers:
+                warnings.append(f"Unknown MCP server '{missing}' in run config; ignored.")
+            kept: list[ToolSpec] = []
+            for tool in tools:
+                if "__" in tool.name:
+                    server = tool.name.split("__", 1)[0]
+                    if server in known_servers and server not in selected:
+                        continue  # de-selected MCP server → drop its tools for this run
+                kept.append(tool)
+            tools = kept
+
+        # 2. Per-tool overrides — most-granular-wins on top of the selection.
+        overrides = getattr(run_config, "tool_overrides", None) or {}
+        present = {t.name for t in tools}
+        for name, enabled in overrides.items():
+            if name not in present and enabled:
+                warnings.append(f"Unknown tool '{name}' enabled in run config; ignored.")
+        tools = [t for t in tools if overrides.get(t.name, True)]
+        return tools, warnings
+
     def enabled_skills(self) -> list[SkillDoc]:
         """Return enabled skill docs for system-prompt injection."""
         return list(self._skills)
@@ -301,74 +363,84 @@ class CapabilityRegistry:
     # -- built-in filesystem tools (always consent-gated) ------------------
 
     def _builtin_tools(self) -> list[ToolSpec]:
-        """Construct the built-in filesystem tool specs."""
-        path_param = {
-            "type": "object",
-            "properties": {"path": {"type": "string", "description": "Target file or folder path"}},
-            "required": ["path"],
-        }
-        write_param = {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "Target file path"},
-                "content": {"type": "string", "description": "Text content to write"},
-            },
-            "required": ["path", "content"],
-        }
+        """Construct the default agent toolset (FR-008).
+
+        Reuses the existing descriptive names (``read_file``/``list_dir``/
+        ``write_file``) and adds ``edit``/``grep``/``find``/``powershell`` and the
+        ``parallel`` meta-tool. File-accessing tools route through the consent gate;
+        the handlers live in ``file_tools``/``shell_tool``/``parallel_tool`` to keep
+        this module within the modularity limit. Descriptions instruct the agent to
+        read the relevant section before editing (FR-016).
+        """
+        from . import file_tools, parallel_tool, shell_tool
+
+        gate = self._gate
+
+        def fs(fn):
+            """Wrap a file_tools coroutine into a ``(consent, **args)`` handler."""
+            async def _h(*, consent: ConsentFn = None, **kwargs) -> ToolResult:
+                return await fn(gate, consent, **kwargs)
+            return _h
+
+        async def _parallel(*, consent: ConsentFn = None, **kwargs) -> ToolResult:
+            return await parallel_tool.run_parallel(self, consent, **kwargs)
+
+        path_only = {"type": "object",
+                     "properties": {"path": {"type": "string", "description": "Target file or folder path"}},
+                     "required": ["path"]}
+        read_param = {"type": "object", "properties": {
+            "path": {"type": "string", "description": "File to read"},
+            "start_line": {"type": "integer", "description": "Optional 1-based start line (inclusive)"},
+            "end_line": {"type": "integer", "description": "Optional 1-based end line (inclusive)"},
+        }, "required": ["path"]}
+        write_param = {"type": "object", "properties": {
+            "path": {"type": "string", "description": "Target file path"},
+            "content": {"type": "string", "description": "Full text content to write"},
+        }, "required": ["path", "content"]}
+        edit_param = {"type": "object", "properties": {
+            "path": {"type": "string", "description": "File to edit (read it first to place the edit)"},
+            "old_string": {"type": "string", "description": "Exact text to replace (must be unique). Exact-string mode."},
+            "new_string": {"type": "string", "description": "Replacement text for old_string."},
+            "start_line": {"type": "integer", "description": "1-based start line for line-range mode."},
+            "end_line": {"type": "integer", "description": "1-based end line (inclusive) for line-range mode."},
+            "new_content": {"type": "string", "description": "Replacement content for the line range."},
+        }, "required": ["path"]}
+        grep_param = {"type": "object", "properties": {
+            "pattern": {"type": "string", "description": "Regex to search for"},
+            "path": {"type": "string", "description": "Base directory (default: workspace)"},
+            "glob": {"type": "string", "description": "Optional glob to limit files, e.g. **/*.py"},
+        }, "required": ["pattern"]}
+        find_param = {"type": "object", "properties": {
+            "glob": {"type": "string", "description": "Glob to match, e.g. **/*.md"},
+            "path": {"type": "string", "description": "Base directory (default: workspace)"},
+        }, "required": ["glob"]}
+        shell_param = {"type": "object", "properties": {
+            "command": {"type": "string", "description": "PowerShell command to run"},
+            "cwd": {"type": "string", "description": "Working directory (default: workspace)"},
+        }, "required": ["command"]}
+        parallel_param = {"type": "object", "properties": {
+            "calls": {"type": "array", "description": "Two or more INDEPENDENT sub-tool-calls to run concurrently",
+                      "items": {"type": "object", "properties": {
+                          "tool": {"type": "string"},
+                          "arguments": {"type": "object"}},
+                          "required": ["tool", "arguments"]}},
+        }, "required": ["calls"]}
+
         return [
-            ToolSpec("read_file", "Read a UTF-8 text file.", path_param, self._read_file),
-            ToolSpec("list_dir", "List the entries of a directory.", path_param, self._list_dir),
-            ToolSpec("write_file", "Write UTF-8 text to a file (creates parents).", write_param, self._write_file),
+            ToolSpec("read_file", "Read a UTF-8 text file, optionally a specific line range.",
+                     read_param, fs(file_tools.read_file)),
+            ToolSpec("list_dir", "List the entries of a directory.", path_only, fs(file_tools.list_dir)),
+            ToolSpec("write_file", "Create or overwrite a file (creates parent folders).",
+                     write_param, fs(file_tools.write_file)),
+            ToolSpec("edit", "Precise in-place edit: exact-string find/replace (unique) OR line-range "
+                             "replace. Read the file first so the target is correct.",
+                     edit_param, fs(file_tools.edit)),
+            ToolSpec("grep", "Search file contents for a regex pattern; returns file:line matches.",
+                     grep_param, fs(file_tools.grep)),
+            ToolSpec("find", "Find files by glob; returns matching paths.", find_param, fs(file_tools.find)),
+            ToolSpec("powershell", "Run a PowerShell command (starts in the workspace; consent-gated; "
+                                   "bounded by a timeout).", shell_param, fs(shell_tool.powershell)),
+            ToolSpec("parallel", "Run two or more INDEPENDENT tool calls concurrently. Do not use it for "
+                                 "concurrent operations on the same file.", parallel_param, _parallel),
         ]
 
-    async def _ensure(self, path: str, access: Access, consent: ConsentFn) -> Path | str:
-        """Authorize a path via the gate (prompting if needed). Returns Path or error str."""
-        decision = self._gate.authorize(path, access)
-        if decision.kind == DecisionKind.ALLOW:
-            return Path(decision.path)
-        if decision.kind == DecisionKind.DENY:
-            return f"Access denied: {decision.reason}"
-        # NEEDS_CONSENT — ask the user via the engine-supplied callback.
-        granted = await consent(decision.path, access)
-        if not granted:
-            return "Access denied by user."
-        # Re-authorize now that a grant may exist.
-        recheck = self._gate.authorize(path, access)
-        if recheck.kind == DecisionKind.ALLOW:
-            return Path(recheck.path)
-        return "Access denied: still not permitted after consent."
-
-    async def _read_file(self, *, path: str, consent: ConsentFn) -> ToolResult:
-        """Read a text file after consent authorization."""
-        resolved = await self._ensure(path, Access.READ, consent)
-        if isinstance(resolved, str):
-            return ToolResult(False, "", error=resolved)
-        try:
-            return ToolResult(True, resolved.read_text(encoding="utf-8", errors="replace"))
-        except OSError as exc:
-            return ToolResult(False, "", error=f"Read failed: {exc}")
-
-    async def _list_dir(self, *, path: str, consent: ConsentFn) -> ToolResult:
-        """List a directory after consent authorization."""
-        resolved = await self._ensure(path, Access.READ, consent)
-        if isinstance(resolved, str):
-            return ToolResult(False, "", error=resolved)
-        try:
-            entries = sorted(
-                f"{p.name}/" if p.is_dir() else p.name for p in resolved.iterdir()
-            )
-            return ToolResult(True, "\n".join(entries) or "(empty)")
-        except OSError as exc:
-            return ToolResult(False, "", error=f"List failed: {exc}")
-
-    async def _write_file(self, *, path: str, content: str, consent: ConsentFn) -> ToolResult:
-        """Write a text file after read-write consent authorization."""
-        resolved = await self._ensure(path, Access.READ_WRITE, consent)
-        if isinstance(resolved, str):
-            return ToolResult(False, "", error=resolved)
-        try:
-            resolved.parent.mkdir(parents=True, exist_ok=True)
-            resolved.write_text(content, encoding="utf-8")
-            return ToolResult(True, f"Wrote {len(content)} chars to {resolved}")
-        except OSError as exc:
-            return ToolResult(False, "", error=f"Write failed: {exc}")

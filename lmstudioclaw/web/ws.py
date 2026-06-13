@@ -101,3 +101,58 @@ async def session_ws_endpoint(websocket: WebSocket, session_id: str, hub: Sessio
         hub.detach(session_id, websocket)
     except Exception:  # pragma: no cover - defensive
         hub.detach(session_id, websocket)
+
+
+class StatusHub:
+    """App-wide live-status channel (``/ws/status``) for the SPA shell.
+
+    Broadcasts ``model_status`` / ``run_status`` / ``queue`` events so the top-right
+    run indicator, the collapsible queue panel, and the "Load model" feedback update
+    live without polling (FR-005/FR-024). On connect it replays a full snapshot so the
+    UI recovers current state after a dropped channel (FR-007). It is push-only — client
+    messages are ignored (the channel exists purely to receive status).
+    """
+
+    def __init__(self) -> None:
+        """Initialize with no sockets and no snapshot provider yet."""
+        self._sockets: set[WebSocket] = set()
+        # Set by the controller: returns the current set of status events to replay.
+        self.snapshot_provider = None
+
+    async def attach(self, websocket: WebSocket) -> None:
+        """Accept a socket and immediately replay the current status snapshot."""
+        await websocket.accept()
+        self._sockets.add(websocket)
+        if self.snapshot_provider is not None:
+            try:
+                for event in self.snapshot_provider():
+                    await websocket.send_json(event)
+            except Exception:  # pragma: no cover - defensive
+                pass
+
+    def detach(self, websocket: WebSocket) -> None:
+        """Remove a socket from the status channel."""
+        self._sockets.discard(websocket)
+
+    async def broadcast(self, event: dict) -> None:
+        """Send a status event to every connected socket (dropping dead ones)."""
+        dead: list[WebSocket] = []
+        for ws in self._sockets:
+            try:
+                await ws.send_json(event)
+            except Exception:  # pragma: no cover - socket may close mid-send
+                dead.append(ws)
+        for ws in dead:
+            self._sockets.discard(ws)
+
+
+async def status_ws_endpoint(websocket: WebSocket, hub: StatusHub) -> None:
+    """Handle the global status WebSocket: push-only, ignores client messages."""
+    await hub.attach(websocket)
+    try:
+        while True:
+            await websocket.receive_text()  # keepalive; inbound is ignored
+    except WebSocketDisconnect:
+        hub.detach(websocket)
+    except Exception:  # pragma: no cover - defensive
+        hub.detach(websocket)

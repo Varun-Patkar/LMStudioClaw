@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..app import Controller, lifespan
-from .ws import session_ws_endpoint
+from .ws import session_ws_endpoint, status_ws_endpoint
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -40,6 +40,11 @@ def create_app(controller: Controller | None = None) -> FastAPI:
     async def _ws(websocket: WebSocket, session_id: str) -> None:
         """Per-session live channel (streaming + steer/queue/stop/consent)."""
         await session_ws_endpoint(websocket, session_id, app.state.controller.hub)
+
+    @app.websocket("/ws/status")
+    async def _ws_status(websocket: WebSocket) -> None:
+        """App-wide live-status channel (model/run/queue) for the SPA shell."""
+        await status_ws_endpoint(websocket, app.state.controller.status)
 
     @app.get("/api/health")
     async def _health() -> JSONResponse:

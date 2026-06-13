@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     failure_reason TEXT,
     failure_point TEXT,
     context_length INTEGER DEFAULT 0,
+    run_config TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -70,6 +71,7 @@ CREATE TABLE IF NOT EXISTS automations (
     last_run_at TEXT,
     last_run_result TEXT,
     next_run_at TEXT,
+    run_config TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -123,6 +125,17 @@ CREATE TABLE IF NOT EXISTS compression_events (
     tokens_after INTEGER NOT NULL,
     summary_turn_id TEXT
 );
+
+CREATE TABLE IF NOT EXISTS queued_runs (
+    id TEXT PRIMARY KEY,
+    trigger_type TEXT NOT NULL,
+    automation_id TEXT,
+    run_config TEXT,
+    initial_message TEXT,
+    position INTEGER NOT NULL,
+    started INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -155,6 +168,25 @@ class Store:
         with self._lock:
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Best-effort additive migrations for databases created by an earlier version.
+
+        Adds columns introduced in feature 002 (per-run config) to pre-existing
+        ``sessions``/``automations`` tables. Each ALTER is wrapped so a column that
+        already exists (or any storage hiccup) never crashes startup.
+        """
+        for table, column in (
+            ("sessions", "run_config TEXT"),
+            ("automations", "run_config TEXT"),
+        ):
+            with self._lock:
+                try:
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+                    self._conn.commit()
+                except sqlite3.Error:
+                    pass  # column already present or table will be created by schema
 
     def close(self) -> None:
         """Close the underlying connection (best-effort)."""
@@ -201,18 +233,64 @@ class Store:
         session_mode: str = "ephemeral",
         context_length: int = 0,
         session_id: str | None = None,
+        run_config: dict | None = None,
     ) -> str:
         """Insert a new session row (status ``queued``) and return its id."""
         sid = session_id or new_id()
         self._exec(
             """INSERT INTO sessions
                (id, trigger_type, automation_id, persona_id, model_key, status,
-                session_mode, context_length, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
+                session_mode, context_length, run_config, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (sid, trigger_type, automation_id, persona_id, model_key, "queued",
-             session_mode, context_length, _now()),
+             session_mode, context_length,
+             json.dumps(run_config) if run_config is not None else None, _now()),
         )
         return sid
+
+    # -- Persisted run queue (FR-025a) -------------------------------------
+
+    def enqueue_run(
+        self, *, run_id: str, trigger_type: str, automation_id: str | None = None,
+        run_config: dict | None = None, initial_message: str | None = None,
+    ) -> None:
+        """Persist a queued run so the FIFO queue survives an app/PC restart."""
+        with self._lock:
+            try:
+                cur = self._conn.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM queued_runs")
+                position = cur.fetchone()[0]
+                self._conn.execute(
+                    """INSERT OR REPLACE INTO queued_runs
+                       (id, trigger_type, automation_id, run_config, initial_message,
+                        position, started, created_at)
+                       VALUES (?,?,?,?,?,?,0,?)""",
+                    (run_id, trigger_type, automation_id,
+                     json.dumps(run_config) if run_config is not None else None,
+                     initial_message, position, _now()),
+                )
+                self._conn.commit()
+            except sqlite3.Error:
+                pass  # best-effort: queue UI degrades gracefully if persistence hiccups
+
+    def mark_run_started(self, run_id: str) -> None:
+        """Flag a persisted run as dequeued/started."""
+        self._exec("UPDATE queued_runs SET started=1 WHERE id=?", (run_id,))
+
+    def remove_queued_run(self, run_id: str) -> None:
+        """Remove a persisted run row (cancelled, completed, or failed)."""
+        self._exec("DELETE FROM queued_runs WHERE id=?", (run_id,))
+
+    def list_queued_runs(self, *, pending_only: bool = False) -> list[dict[str, Any]]:
+        """Return persisted runs in FIFO order (optionally only not-yet-started)."""
+        where = "WHERE started=0" if pending_only else ""
+        rows = self._query(f"SELECT * FROM queued_runs {where} ORDER BY position ASC")
+        for row in rows:
+            if row.get("run_config"):
+                try:
+                    row["run_config"] = json.loads(row["run_config"])
+                except (TypeError, ValueError):
+                    row["run_config"] = None
+        return rows
 
     def update_session(self, session_id: str, **fields: Any) -> None:
         """Patch session fields; stamps ``started_at``/``ended_at`` by status."""
@@ -297,25 +375,28 @@ class Store:
     def create_automation(self, data: dict[str, Any]) -> str:
         """Insert an automation row from a validated dict; return its id."""
         aid = data.get("id") or new_id()
+        rc = data.get("run_config")
         self._exec(
             """INSERT INTO automations
                (id, name, task, schedule_type, daily_days, daily_time, interval_unit,
                 interval_value, session_mode, persona_id, model_override, enabled,
-                next_run_at, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                next_run_at, run_config, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (aid, data["name"], data["task"], data["schedule_type"],
              json.dumps(data.get("daily_days")) if data.get("daily_days") is not None else None,
              data.get("daily_time"), data.get("interval_unit"), data.get("interval_value"),
              data.get("session_mode", "new"), data.get("persona_id"),
              data.get("model_override"), 1 if data.get("enabled", True) else 0,
-             data.get("next_run_at"), _now()),
+             data.get("next_run_at"), json.dumps(rc) if rc is not None else None, _now()),
         )
         return aid
 
     def update_automation(self, automation_id: str, **fields: Any) -> None:
-        """Patch automation fields (serializes ``daily_days`` list to JSON)."""
+        """Patch automation fields (serializes ``daily_days``/``run_config`` to JSON)."""
         if "daily_days" in fields and fields["daily_days"] is not None:
             fields["daily_days"] = json.dumps(fields["daily_days"])
+        if "run_config" in fields and fields["run_config"] is not None:
+            fields["run_config"] = json.dumps(fields["run_config"])
         if "enabled" in fields:
             fields["enabled"] = 1 if fields["enabled"] else 0
         cols = ", ".join(f"{k}=?" for k in fields)
@@ -555,10 +636,15 @@ class Store:
 
 
 def _decode_automation(row: dict[str, Any]) -> dict[str, Any]:
-    """Decode an automation row's JSON ``daily_days`` field into a list."""
+    """Decode an automation row's JSON ``daily_days`` and ``run_config`` fields."""
     if row.get("daily_days"):
         try:
             row["daily_days"] = json.loads(row["daily_days"])
         except (json.JSONDecodeError, TypeError):
             row["daily_days"] = None
+    if row.get("run_config"):
+        try:
+            row["run_config"] = json.loads(row["run_config"])
+        except (json.JSONDecodeError, TypeError):
+            row["run_config"] = None
     return row
