@@ -1,0 +1,18 @@
+{
+  "workflow": "speckit",
+  "specName": "001-agent-runtime",
+  "branch": "001-agent-runtime",
+  "selectedAt": "2026-06-13T05:14:23.732Z",
+  "currentStep": "specify",
+  "status": "completed",
+  "history": [
+    {
+      "step": "specify",
+      "substep": null,
+      "kind": "complete",
+      "by": "extension",
+      "at": "2026-06-13T05:18:11.654Z"
+    }
+  ],
+  "profile": "standard"
+}
