@@ -3,7 +3,30 @@
   "specName": "002-ui-tools-concurrency",
   "branch": "002-ui-tools-concurrency",
   "selectedAt": "2026-06-13T05:14:19.905Z",
-  "currentStep": "specify",
-  "status": "draft",
-  "history": []
+  "currentStep": "analyze",
+  "status": "tasking",
+  "history": [
+    {
+      "step": "plan",
+      "substep": null,
+      "kind": "start",
+      "by": "extension",
+      "at": "2026-06-13T05:46:53.909Z"
+    },
+    {
+      "step": "tasks",
+      "substep": null,
+      "kind": "start",
+      "by": "extension",
+      "at": "2026-06-13T05:49:47.796Z"
+    },
+    {
+      "step": "analyze",
+      "substep": null,
+      "kind": "start",
+      "by": "extension",
+      "at": "2026-06-13T05:50:09.655Z"
+    }
+  ],
+  "profile": "standard"
 }
