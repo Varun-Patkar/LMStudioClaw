@@ -31,6 +31,8 @@ Where a capability already exists in the codebase, this spec preserves it and on
 - Q: What controls does the active-run surface offer when the top-right indicator is clicked? → A: It is a quick-navigate to whatever is running — clicking opens the running session view (an automation run also has its own session), where the full controls live (stop, steer, queue-message, transcript). For an automation run, the session view also shows the automation's definition alongside, with the ability to edit that automation (also editable from the Automations list).
 - Q: How does the edit tool target the section to replace? → A: The edit tool is overloaded and supports both modes: (1) exact-string find-and-replace (provide the exact existing text and its replacement; must match exactly once or fail) and (2) line-range replace (provide start/end line numbers and the new content). Line-range is more token-efficient for whole-line/block replacements; exact-string handles sub-line or cross-line spans (e.g., from a mid-line position on one line to a mid-line position on another). The agent chooses whichever fits the edit.
 - Q: How should the existing built-in tool names (read_file, list_dir, write_file) relate to the requested set (read, ls, write, …)? → A: Keep one consistent toolset that favors clear, descriptive names. Reuse the existing descriptive names where a tool already exists (read_file, list_dir, write_file) and add the missing tools (edit, grep, find, powershell, and the parallel meta-tool) with equally descriptive names. The requested short names (read/ls/write/find/…) describe the capabilities; tool identities may be the more descriptive forms. This is not about backward-compatibility aliases — there is a single set of well-named tools.
+- Q: Does the run queue survive an app/PC restart? → A: Yes — the queue is fully persisted. Both manual sessions and automation runs that were queued (and an interrupted in-progress run) are saved and resumed on next startup, continuing where they left off, so no queued work is silently lost.
+- Q: When per-run tool overrides and per-run MCP selection overlap, what wins? → A: The most granular (lowest-level) decision has the highest weight. MCP selection first decides which servers are active for the run, then per-tool enable/disable overrides apply on top of the resulting tool set (built-in + MCP). De-selecting an MCP for a run does not disable it globally — it is just not used for that run. By default a run uses the global settings; the user may change them per session, and those choices persist for that session until changed by a follow-up.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -167,6 +169,7 @@ When starting a session (including a follow-up that begins a new run) or creatin
 - **FR-023**: When the queue is non-empty, the UI MUST show a collapsible panel listing queued items in FIFO order with their type/label; when the queue is empty, the panel MUST be hidden.
 - **FR-024**: The run indicator and queue panel MUST update live as runs start, finish, and queue contents change.
 - **FR-025**: Users MUST be able to remove a queued item before it starts without affecting the active run.
+- **FR-025a**: The run queue MUST be persisted: queued manual sessions and automation runs, plus an interrupted in-progress run, MUST be saved and resumed on next app startup (continuing where they left off) so no queued work is silently lost on an app or PC restart.
 
 #### Per-run configuration
 
@@ -174,7 +177,9 @@ When starting a session (including a follow-up that begins a new run) or creatin
 - **FR-027**: Creating or editing an automation MUST allow saving the same run configuration (model, per-run tool overrides, per-run MCP selection) to be applied on each scheduled run.
 - **FR-028**: Per-run tool overrides MUST be independent of the global tool configuration: a globally enabled tool MAY be disabled for a run, and a globally disabled tool MAY be enabled for a run, without changing the global configuration.
 - **FR-029**: A per-run model selection MUST cause that model to be loaded for the run instead of the default model.
-- **FR-030**: A per-run MCP selection MUST restrict the active MCP servers/tools for that run to the selected set.
+- **FR-030**: A per-run MCP selection MUST restrict the active MCP servers/tools for that run to the selected set. De-selecting an MCP for a run MUST only scope it out of that run and MUST NOT change its global enabled state.
+- **FR-030a**: Per-run capability resolution MUST apply most-granular-wins precedence: the per-run MCP selection determines which servers are active, then per-tool enable/disable overrides apply on top of the resulting tool set (built-in + MCP tools), so a run may keep a server active while disabling one specific tool it provides.
+- **FR-030b**: Per-run configuration choices MUST default to the global settings, MAY be changed for a session, and MUST persist for that session until changed by a follow-up that starts a new run.
 - **FR-031**: Skills MUST remain globally defined and available to every run; they MUST NOT appear as per-run toggles.
 - **FR-032**: When no run configuration is supplied, a run MUST use the default model, the global tool configuration, and the global MCP configuration.
 - **FR-033**: If a saved run configuration references a tool or MCP server that no longer exists, the run MUST proceed with the still-valid capabilities and note the missing reference rather than failing outright.
@@ -182,11 +187,11 @@ When starting a session (including a follow-up that begins a new run) or creatin
 ### Key Entities *(include if feature involves data)*
 
 - **Run**: A single unit of agent work — a session or an automation execution. Has a type, status (queued / loading / active / completed / failed), a trigger, and an associated run configuration. Exactly one run is active at a time.
-- **Run Queue**: The ordered (FIFO) list of pending runs waiting for the active run to finish. Visible in the UI only when non-empty.
+- **Run Queue**: The ordered (FIFO) list of pending runs waiting for the active run to finish. Visible in the UI only when non-empty. Persisted across app/PC restarts and resumed on next startup.
 - **Run Configuration**: The per-run settings attached to a session or automation: selected model, per-run tool enable/disable overrides, and per-run MCP selection. Optional; absent means "use global defaults".
 - **Tool**: A capability available to the agent during a run (read, powershell, edit, write, grep, find, ls, parallel, plus any custom/MCP tools). Has an enabled/disabled state globally and an optional per-run override.
 - **Global Tool Configuration**: The default enabled/disabled state of each tool, applied to runs that don't override it; unaffected by per-run overrides.
-- **MCP Selection**: The set of MCP servers/tools active for a run; globally configured with an optional per-run restriction.
+- **MCP Selection**: The set of MCP servers/tools active for a run; globally configured with an optional per-run restriction. A per-run restriction scopes a server out of that run only and does not change its global enabled state.
 
 ## Success Criteria *(mandatory)*
 
