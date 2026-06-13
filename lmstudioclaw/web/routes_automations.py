@@ -5,6 +5,8 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from .routes_sessions import RunConfigIn
+
 router = APIRouter(prefix="/api/automations", tags=["automations"])
 
 
@@ -21,6 +23,7 @@ class AutomationIn(BaseModel):
     session_mode: str = "new"
     persona_id: str | None = None
     model_override: str | None = None
+    run_config: RunConfigIn | None = None
     enabled: bool = True
 
 

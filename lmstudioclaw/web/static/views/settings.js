@@ -109,10 +109,7 @@ function advancedCard(modelsResp, root) {
           try { await post("/api/models/context-pref", { model_key: m.key, context_length: Number(ctx.value) }); toast("Saved."); }
           catch (e) { toast(e.message); }
         } }, "Set context"),
-        el("button", { class: "btn green", onclick: async () => {
-          try { await post("/api/models/load", { model_key: m.key, context_length: Number(ctx.value) }); toast("Loaded."); }
-          catch (e) { toast(e.message); }
-        } }, "Load"))));
+        loadButton(m, ctx))));
   });
   const unloadBtn = el("button", { class: "btn red", onclick: async () => {
     try { await post("/api/models/unload", {}); toast("Unloaded."); } catch (e) { toast(e.message); }
@@ -126,6 +123,30 @@ function advancedCard(modelsResp, root) {
 }
 
 // -- helpers ----------------------------------------------------------------
+
+/**
+ * A "Load" button that gives immediate non-blocking feedback (FR-004): on click it
+ * shows a spinner and disables itself, then restores once the request returns. Actual
+ * load status (ready/error) arrives live via /ws/status, so no page reload is needed.
+ */
+function loadButton(m, ctx) {
+  const btn = el("button", { class: "btn green" }, "Load");
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    btn.innerHTML = "";
+    btn.append(el("span", { class: "spinner" }), document.createTextNode(" Loading…"));
+    try {
+      await post("/api/models/load", { model_key: m.key, context_length: Number(ctx.value) });
+      toast("Load requested — watch the status indicator.");
+    } catch (e) {
+      toast(e.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Load";
+    }
+  });
+  return btn;
+}
 
 async function save(patchBody) {
   try { await patch("/api/settings", patchBody); } catch (e) { toast(e.message); }

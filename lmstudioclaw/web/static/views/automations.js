@@ -1,20 +1,22 @@
 // Automations view: list, create (Daily multi-weekday+time or Interval), toggle
 // session mode, enable/disable, run-now, delete (US4).
 import { get, post, patch, del, el, toast } from "../api.js";
+import { buildRunConfig } from "./runconfig.js";
 
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 /** Render the Automations view. */
 export async function renderAutomations(root) {
-  const [automations, personas] = await Promise.all([
+  const [automations, personas, modelsResp] = await Promise.all([
     get("/api/automations"),
     get("/api/personas").catch(() => []),
+    get("/api/models").catch(() => ({ models: [] })),
   ]);
-  root.append(newAutomationCard(personas, root), listCard(automations, root));
+  root.append(await newAutomationCard(personas, modelsResp.models, root), listCard(automations, root));
 }
 
 /** Build the create-automation form card. */
-function newAutomationCard(personas, root) {
+async function newAutomationCard(personas, models, root) {
   const name = el("input", { placeholder: "Name" });
   const task = el("textarea", { placeholder: "Task / instruction for the agent" });
 
@@ -53,12 +55,16 @@ function newAutomationCard(personas, root) {
     el("option", { value: "" }, "Default persona"),
     ...personas.map((p) => el("option", { value: p.id }, p.name)));
 
+  // Per-run configuration saved with the automation and applied each run (US4).
+  const runConfig = await buildRunConfig(null, models);
+
   const createBtn = el("button", { class: "btn green", onclick: async () => {
     const body = {
       name: name.value.trim(), task: task.value.trim(),
       schedule_type: scheduleType.value,
       session_mode: sessionMode.value,
       persona_id: personaSel.value || null,
+      run_config: runConfig.getConfig(),
     };
     if (scheduleType.value === "daily") {
       body.daily_days = dayChecks.filter((l) => l.querySelector("input").checked)
@@ -80,6 +86,7 @@ function newAutomationCard(personas, root) {
     el("div", { class: "row" }, el("span", { class: "muted" }, "Schedule"), scheduleType),
     dailyBox, intervalBox,
     el("div", { class: "row" }, el("span", { class: "muted" }, "Mode"), sessionMode, personaSel),
+    runConfig.element,
     createBtn);
 }
 

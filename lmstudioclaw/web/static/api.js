@@ -54,3 +54,32 @@ export function toast(message) {
   list.append(item);
   setTimeout(() => item.remove(), 4000);
 }
+
+/**
+ * Subscribe to the app-wide live-status channel (/ws/status).
+ *
+ * Calls `onEvent(event)` for each pushed model_status / run_status / queue event,
+ * and auto-reconnects with backoff so the UI recovers current state after a dropped
+ * channel (FR-007). Returns a handle with `close()`.
+ */
+export function connectStatus(onEvent) {
+  let socket = null;
+  let closed = false;
+  let retry = 1000;
+
+  const open = () => {
+    if (closed) return;
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    socket = new WebSocket(`${proto}://${location.host}/ws/status`);
+    socket.addEventListener("message", (ev) => {
+      try { onEvent(JSON.parse(ev.data)); } catch { /* ignore malformed */ }
+      retry = 1000; // healthy connection resets backoff
+    });
+    socket.addEventListener("close", () => {
+      if (!closed) setTimeout(open, retry = Math.min(retry * 1.6, 8000));
+    });
+    socket.addEventListener("error", () => { try { socket.close(); } catch { /* noop */ } });
+  };
+  open();
+  return { close() { closed = true; try { socket && socket.close(); } catch { /* noop */ } } };
+}

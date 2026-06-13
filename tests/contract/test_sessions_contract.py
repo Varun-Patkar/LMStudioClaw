@@ -104,3 +104,39 @@ def test_websocket_receives_events(client):
             if {"status", "token"} <= seen:
                 break
     assert "status" in seen and "token" in seen
+
+
+def test_status_channel_snapshot_on_connect(client):
+    """The /ws/status channel replays model/run/queue on connect (FR-005/FR-007)."""
+    with client.websocket_connect("/ws/status") as ws:
+        seen = {}
+        for _ in range(3):
+            evt = ws.receive_json()
+            seen[evt.get("type")] = evt
+    assert "model_status" in seen
+    assert "run_status" in seen
+    assert "queue" in seen
+    assert seen["model_status"]["status"] in ("idle", "loading", "ready", "error", "unloaded")
+    assert isinstance(seen["queue"]["items"], list)
+
+
+def test_session_accepts_run_config(client):
+    """POST /api/sessions accepts a run_config block (FR-026)."""
+    resp = client.post("/api/sessions", json={
+        "run_config": {"model": "fake", "tool_overrides": {"powershell": False},
+                       "mcp_selection": []},
+    })
+    assert resp.status_code == 200
+    assert "session_id" in resp.json()
+
+
+def test_queue_items_have_type_and_label(client):
+    """Queue snapshot items expose trigger_type + label for the run/queue surface."""
+    client.post("/api/sessions", json={})
+    client.post("/api/sessions", json={})  # second one should queue behind the first
+    queue = client.get("/api/queue").json()
+    assert isinstance(queue, list)
+    for item in queue:
+        assert "state" in item
+        if item["state"] in ("active", "queued"):
+            assert "trigger_type" in item and "label" in item

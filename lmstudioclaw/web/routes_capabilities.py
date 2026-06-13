@@ -27,6 +27,26 @@ async def list_capabilities(request: Request) -> list[dict]:
     return _ctrl(request).store.list_capabilities()
 
 
+@router.get("/api/tools")
+async def list_tools(request: Request) -> dict:
+    """List tool names available for per-run overrides + MCP servers (US4).
+
+    Returns the default built-in tools (always present), any registered custom/MCP
+    tools, and the MCP server names — enough for the run-config UI to render per-run
+    enable/disable toggles and an MCP selection. No discovery side effects are forced.
+    """
+    ctrl = _ctrl(request)
+    builtins = [{"name": t.name, "description": t.description}
+                for t in ctrl.registry._builtin_tools()]
+    extras = [c for c in ctrl.store.list_capabilities() if c.get("kind") in ("tool", "mcp")]
+    mcp_servers = sorted({c["name"] for c in extras if c.get("kind") == "mcp"})
+    return {
+        "builtin": builtins,
+        "tools": [{"name": c["name"], "kind": c["kind"]} for c in extras],
+        "mcp_servers": mcp_servers,
+    }
+
+
 @router.post("/api/capabilities/refresh")
 async def refresh_capabilities(request: Request) -> dict:
     """Re-scan skills, tools, and ``mcp.json`` (delegates to the registry)."""

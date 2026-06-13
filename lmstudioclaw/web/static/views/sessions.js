@@ -2,6 +2,7 @@
 // detail panel that streams over the WebSocket with steering / queue / stop and
 // inline consent prompts (US1 + US3).
 import { get, post, del, el, toast } from "../api.js";
+import { buildRunConfig } from "./runconfig.js";
 
 /** Render the Sessions list + new-session controls. */
 export async function renderSessions(root) {
@@ -24,23 +25,30 @@ export async function renderSessions(root) {
     el("option", { value: "" }, "Default persona"),
     ...personas.map((p) => el("option", { value: p.id }, p.name)));
 
+  // Per-run configuration form (model override + tool/MCP overrides) — US4.
+  const runConfig = await buildRunConfig(null, modelsResp.models);
+
   const startBtn = el("button", {
     class: "btn green",
     onclick: async () => {
+      startBtn.disabled = true;
       try {
         const res = await post("/api/sessions", {
           model: modelSelect.value || null,
           persona_id: personaSelect.value || null,
+          run_config: runConfig.getConfig(),
         });
         location.hash = `sessions/detail/${res.session_id}`;
       } catch (e) { toast(e.message); }
+      finally { startBtn.disabled = false; }
     },
   }, "Start session");
 
   root.append(
     el("div", { class: "card" },
       el("h2", {}, "New session"),
-      el("div", { class: "row wrap" }, modelSelect, personaSelect, startBtn)),
+      el("div", { class: "row wrap" }, modelSelect, personaSelect, startBtn),
+      runConfig.element),
     el("div", { class: "card" },
       el("h2", {}, "Sessions"),
       sessionsTable(sessions)),
@@ -129,6 +137,29 @@ async function renderSessionDetail(root, sessionId) {
       transcript,
       el("div", { class: "composer" }, input)),
   );
+
+  // For an automation run, show its definition alongside, with an edit affordance (FR-022).
+  if (session.trigger_type === "automation" && session.automation_id) {
+    root.append(await automationPanel(session.automation_id));
+  }
+}
+
+/** Build a read-only automation definition panel with a link to edit it (FR-022). */
+async function automationPanel(automationId) {
+  try {
+    const list = await get("/api/automations");
+    const a = list.find((x) => x.id === automationId);
+    if (!a) return el("div", {});
+    return el("div", { class: "card" },
+      el("div", { class: "row" }, el("h2", {}, "Automation"),
+        el("span", { class: "spacer" }),
+        el("button", { class: "btn ghost", onclick: () => { location.hash = "automations"; } }, "Edit in Automations")),
+      el("p", {}, el("strong", {}, a.name)),
+      el("p", { class: "muted" }, a.task || ""),
+      el("p", { class: "muted" }, `Mode: ${a.session_mode} · ${a.enabled ? "enabled" : "disabled"}`));
+  } catch {
+    return el("div", {});
+  }
 }
 
 let isGenerating = false;

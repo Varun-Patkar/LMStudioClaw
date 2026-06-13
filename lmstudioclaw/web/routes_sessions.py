@@ -7,7 +7,9 @@ grants, and compression events, stop a turn or session, and manage the FIFO queu
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from ..capabilities.run_config import RunConfig
 
 router = APIRouter(tags=["sessions"])
 
@@ -17,18 +19,33 @@ def _ctrl(request: Request):
     return request.app.state.controller
 
 
+class RunConfigIn(BaseModel):
+    """Per-run configuration (model + tool overrides + MCP selection) for a run.
+
+    All fields are optional; an absent block (or absent fields) means "use global
+    defaults" (FR-032). Validated at the boundary; the controller coerces it into a
+    :class:`~lmstudioclaw.capabilities.run_config.RunConfig`.
+    """
+
+    model: str | None = None
+    tool_overrides: dict[str, bool] = Field(default_factory=dict)
+    mcp_selection: list[str] | None = None
+
+
 class SessionStart(BaseModel):
     """Payload to start a manual session."""
 
     model: str | None = None
     persona_id: str | None = None
+    run_config: RunConfigIn | None = None
 
 
 @router.post("/api/sessions")
 async def start_session(payload: SessionStart, request: Request) -> dict:
-    """Start a manual session; if one is active it is queued (FR-008)."""
+    """Start a manual session; if one is active it is queued (FR-008/FR-026)."""
+    rc = RunConfig.from_dict(payload.run_config.model_dump()) if payload.run_config else None
     session_id, position = _ctrl(request).start_manual_session(
-        model=payload.model, persona_id=payload.persona_id
+        model=payload.model, persona_id=payload.persona_id, run_config=rc,
     )
     return {"session_id": session_id, "queue_position": position}
 
@@ -74,15 +91,22 @@ async def stop_session(session_id: str, payload: StopIn, request: Request) -> di
 
 @router.get("/api/queue")
 async def view_queue(request: Request) -> list[dict]:
-    """View the FIFO queue (active + waiting items, FR-008)."""
-    return _ctrl(request).queue.snapshot()
+    """View the FIFO queue with type/label for the run/queue surface (FR-008/FR-023)."""
+    ctrl = _ctrl(request)
+    out: list[dict] = []
+    active = ctrl._active_run_info()
+    if active is not None:
+        out.append({**active, "state": "active"})
+    out.extend(ctrl._queue_items())
+    return out
 
 
 @router.delete("/api/queue/{session_id}")
 async def cancel_queued(session_id: str, request: Request) -> dict:
-    """Cancel a queued (not-yet-started) item (FR-008)."""
+    """Cancel a queued (not-yet-started) item (FR-008/FR-025)."""
     ctrl = _ctrl(request)
     if not ctrl.queue.cancel(session_id):
         raise HTTPException(409, "Item not found or already started")
     ctrl.store.update_session(session_id, status="stopped")
+    ctrl._schedule_status()
     return {"ok": True}
