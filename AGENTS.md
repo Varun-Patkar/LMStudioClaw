@@ -50,9 +50,16 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full map and control flow.
   `RunConfig{model, tool_overrides, mcp_selection}`. Resolution is **most-granular-wins**
   (MCP selection picks servers, then per-tool overrides apply on top) and never mutates
   global config. Skills are always global — never per-run toggles.
-- **Live UI, no polling.** App-wide status flows over `/ws/status` (`StatusHub`); the SPA
+- **Live UI, no polling.** App-wide status flows over `/ws/status` (`StatusHub`); the UI
   updates the run indicator/queue panel and "Load model" feedback from pushed events. Do
   not add status polling timers. Content uses a fluid ~90vw layout (no fixed narrow cap).
+- **The web UI is a React app** (`frontend/`, Vite + react-router + react-markdown +
+  framer-motion) that **builds into `lmstudioclaw/web/static/`** — the FastAPI StaticFiles
+  mount serves the build unchanged. The agent runtime serves files; it does not require
+  Node at run time. NOTE: this supersedes the original framework-free SPA decision at the
+  user's explicit request (a tension with Constitution V — Resource Frugality); keep the
+  bundle lean and avoid heavy deps. Edit UI under `frontend/src/`, then rebuild; never
+  hand-edit files in `web/static/` (they are generated).
 - **All agent file I/O goes through `consent/path_gate.py`.** Workspace is always allowed;
   the secrets area + app internals are a hard deny-list; grants are hierarchical and
   least-privilege (read ≠ write).
@@ -73,6 +80,21 @@ pip install -e ".[dev]"
 lmstudio                             # run the controller (entry point in pyproject.toml)
 pytest                               # unit + integration + contract tests under tests/
 ```
+
+### Web UI (React)
+
+```powershell
+cd frontend
+npm install                          # first time only
+npm run build                        # builds into ../lmstudioclaw/web/static (served by FastAPI)
+npm run dev                          # optional: Vite dev server on :5273, proxies /api + /ws to :8765
+```
+
+After changing anything under `frontend/src/`, run `npm run build` and restart/refresh the
+controller. The build wipes `web/static/` and regenerates `index.html` + `assets/`.
+
+- **uvicorn needs `uvicorn[standard]`** (bundles `websockets`); without it, `/ws/*`
+  upgrades fail at runtime even though `TestClient` WebSocket tests pass.
 
 - If the venv `pip` launcher errors with a stale `LMStudioClaw` path, use `python -m pip`
   (and `python -m pytest`).

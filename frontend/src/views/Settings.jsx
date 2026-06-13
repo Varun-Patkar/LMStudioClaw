@@ -1,0 +1,178 @@
+import { useEffect, useState } from "react";
+import { get, post, patch, del } from "../api.js";
+import { useToast } from "../components/Toast.jsx";
+import Skeleton from "../components/Skeleton.jsx";
+
+export default function Settings() {
+  const [data, setData] = useState(null);
+  const toast = useToast();
+
+  const load = () => Promise.all([
+    get("/api/settings"),
+    get("/api/models").catch(() => ({ models: [], connected: false })),
+    get("/api/personas").catch(() => []),
+    get("/api/grants").catch(() => []),
+  ]).then(([settings, modelsResp, personas, grants]) =>
+    setData({ settings, modelsResp, personas, grants }));
+
+  useEffect(() => { load(); }, []);
+  if (!data) return <Skeleton />;
+
+  const { settings, modelsResp, personas, grants } = data;
+  const save = async (patchObj) => { try { await patch("/api/settings", patchObj); } catch (e) { toast(e.message); } };
+
+  const Field = ({ label, children }) => (
+    <div className="set-field"><label>{label}</label>{children}</div>
+  );
+
+  return (
+    <>
+      {/* General */}
+      <div className="card">
+        <div className="card-head"><h2>General</h2></div>
+        <Field label="Theme">
+          <select defaultValue={settings.theme || "system"} onChange={(e) => {
+            document.documentElement.setAttribute("data-theme", e.target.value); save({ theme: e.target.value });
+          }}>
+            {["system", "dark", "light"].map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </Field>
+        <Field label="Default model">
+          <select defaultValue={settings.default_model || ""} onChange={(e) => { save({ default_model: e.target.value || null }); }}>
+            <option value="">None</option>
+            {modelsResp.models.map((m) => <option key={m.key} value={m.key}>{m.display_name}</option>)}
+          </select>
+        </Field>
+        <Field label="Launch on login (start minimized)">
+          <input type="checkbox" className="switch" defaultChecked={settings.startup_launch} onChange={(e) => save({ startup_launch: e.target.checked })} />
+        </Field>
+      </div>
+
+      {/* Runtime */}
+      <div className="card">
+        <div className="card-head"><h2>Runtime</h2></div>
+        <Field label="Unload model on idle">
+          <input type="checkbox" className="switch" defaultChecked={settings.idle_unload} onChange={(e) => save({ idle_unload: e.target.checked })} />
+        </Field>
+        {[
+          ["Idle timeout (s)", "session_idle_timeout", 1],
+          ["Max run duration (s)", "max_run_duration", 1],
+          ["Retention (days)", "retention_days", 1],
+          ["Compression threshold (0–1)", "compression_threshold", 0.01],
+          ["Web port", "web_port", 1],
+        ].map(([label, key, step]) => (
+          <Field label={label} key={key}>
+            <input type="number" step={step} defaultValue={settings[key]} onChange={(e) => save({ [key]: Number(e.target.value) })} />
+          </Field>
+        ))}
+      </div>
+
+      {/* Folder permissions */}
+      <div className="card">
+        <div className="card-head"><h2>Folder permissions</h2></div>
+        {grants.length ? (
+          <table>
+            <thead><tr><th>Folder</th><th>Scope</th><th>Access</th><th /></tr></thead>
+            <tbody>{grants.map((g) => (
+              <tr key={g.id}><td><code>{g.path}</code></td><td>{g.scope}</td><td>{g.access}</td>
+                <td><button className="btn red" onClick={async () => { try { await del(`/api/grants/${g.id}`); toast("Revoked."); load(); } catch (e) { toast(e.message); } }}>Revoke</button></td></tr>
+            ))}</tbody>
+          </table>
+        ) : <p className="muted">No folder grants. The agent may use the workspace by default; it will ask before accessing anything else.</p>}
+      </div>
+
+      <Personas personas={personas} reload={load} />
+      <ModelManagement modelsResp={modelsResp} reload={load} />
+    </>
+  );
+}
+
+function Personas({ personas, reload }) {
+  const toast = useToast();
+  const [draft, setDraft] = useState({ name: "", instructions: "" });
+  return (
+    <div className="card">
+      <div className="card-head"><h2>Personas</h2></div>
+      {personas.map((p) => <PersonaRow p={p} reload={reload} key={p.id} />)}
+      <div className="card">
+        <div className="card-head"><h3>New persona</h3></div>
+        <input placeholder="New persona name" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
+        <textarea placeholder="Instructions" value={draft.instructions} onChange={(e) => setDraft({ ...draft, instructions: e.target.value })} />
+        <button className="btn green" onClick={async () => {
+          if (!draft.name.trim()) return;
+          try { await post("/api/personas", { name: draft.name.trim(), instructions: draft.instructions }); setDraft({ name: "", instructions: "" }); reload(); }
+          catch (e) { toast(e.message); }
+        }}>Create persona</button>
+      </div>
+    </div>
+  );
+}
+
+function PersonaRow({ p, reload }) {
+  const toast = useToast();
+  const [instr, setInstr] = useState(p.instructions);
+  return (
+    <div className="card">
+      <div className="row"><strong>{p.name}</strong>{p.is_default && <span className="badge">default</span>}</div>
+      <textarea value={instr} onChange={(e) => setInstr(e.target.value)} />
+      <div className="row">
+        <button className="btn" onClick={async () => { try { await patch(`/api/personas/${p.id}`, { instructions: instr }); toast("Saved."); } catch (e) { toast(e.message); } }}>Save</button>
+        {!p.is_default && <button className="btn red" onClick={async () => { try { await del(`/api/personas/${p.id}`); reload(); } catch (e) { toast(e.message); } }}>Delete</button>}
+      </div>
+    </div>
+  );
+}
+
+function ModelManagement({ modelsResp, reload }) {
+  const toast = useToast();
+  const [ctx, setCtx] = useState(() => Object.fromEntries((modelsResp.models || []).map((m) => [m.key, m.max_context_length])));
+  const [loadingKey, setLoadingKey] = useState(null);
+  const [unloading, setUnloading] = useState(false);
+  const anyLoaded = (modelsResp.models || []).some((m) => m.is_loaded);
+
+  if (!modelsResp.connected) {
+    return <div className="card"><div className="card-head"><h2>Advanced → Model Management</h2></div>
+      <p className="muted">LM Studio is not reachable.</p></div>;
+  }
+
+  const loadModel = async (m) => {
+    setLoadingKey(m.key);
+    try { await post("/api/models/load", { model_key: m.key, context_length: Number(ctx[m.key]) }); toast(`Loaded ${m.display_name}.`); reload(); }
+    catch (e) { toast(e.message); } finally { setLoadingKey(null); }
+  };
+  const unload = async () => {
+    setUnloading(true);
+    try { await post("/api/models/unload", {}); toast("Unloaded."); reload(); }
+    catch (e) { toast(e.message); } finally { setUnloading(false); }
+  };
+
+  return (
+    <div className="card">
+      <div className="card-head"><h2>Advanced → Model Management</h2><span className="spacer" />
+        <button className="btn red" disabled={!anyLoaded || unloading} title={!anyLoaded ? "No model is currently loaded" : ""} onClick={unload}>
+          {unloading ? <><span className="spinner" /> Unloading…</> : "Unload current"}
+        </button>
+      </div>
+      <table>
+        <thead><tr><th>Model</th><th>State</th><th>Context</th><th /></tr></thead>
+        <tbody>
+          {modelsResp.models.map((m) => (
+            <tr key={m.key}>
+              <td>{m.display_name}</td>
+              <td>{m.is_loaded ? <span className="badge active">loaded</span> : "—"}</td>
+              <td><input type="number" style={{ width: 130 }} value={ctx[m.key]} onChange={(e) => setCtx({ ...ctx, [m.key]: e.target.value })} /></td>
+              <td>
+                <div className="row">
+                  <button className="btn" onClick={async () => { try { await post("/api/models/context-pref", { model_key: m.key, context_length: Number(ctx[m.key]) }); toast("Saved."); } catch (e) { toast(e.message); } }}>Set context</button>
+                  <button className="btn green" disabled={loadingKey === m.key} onClick={() => loadModel(m)}>
+                    {loadingKey === m.key ? <><span className="spinner" /> Loading…</> : "Load"}
+                  </button>
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}

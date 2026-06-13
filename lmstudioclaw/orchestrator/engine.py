@@ -162,8 +162,10 @@ class Engine:
                 )
 
                 control.stop_turn.clear()
+                await on_event({"type": "turn", "state": "start"})
                 await self._run_turn(session_id, messages, model_id, budget, control, on_event,
                                      unattended, run_config)
+                await on_event({"type": "turn", "state": "end"})
 
                 if control.stop_session.is_set():
                     return SessionResult("stopped")
