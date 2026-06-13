@@ -23,8 +23,16 @@ def _ctrl(request: Request):
 
 @router.get("/api/capabilities")
 async def list_capabilities(request: Request) -> list[dict]:
-    """List skills, tools, and MCP servers with status/enabled/trust."""
-    return _ctrl(request).store.list_capabilities()
+    """List skills, tools, and MCP servers with status/enabled/trust.
+
+    MCP rows are reconciled to ``mcp.json`` (the source of truth) on every read, so a
+    manual edit to the file is reflected immediately without a forced rescan.
+    """
+    ctrl = _ctrl(request)
+    _sync = getattr(ctrl.registry, "sync_mcp_rows", None)
+    if callable(_sync):
+        _sync()
+    return ctrl.store.list_capabilities()
 
 
 @router.get("/api/tools")
@@ -36,6 +44,9 @@ async def list_tools(request: Request) -> dict:
     enable/disable toggles and an MCP selection. No discovery side effects are forced.
     """
     ctrl = _ctrl(request)
+    _sync = getattr(ctrl.registry, "sync_mcp_rows", None)
+    if callable(_sync):
+        _sync()
     builtins = [{"name": t.name, "description": t.description}
                 for t in ctrl.registry._builtin_tools()]
     extras = [c for c in ctrl.store.list_capabilities() if c.get("kind") in ("tool", "mcp")]

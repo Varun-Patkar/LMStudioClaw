@@ -251,6 +251,30 @@ class CapabilityRegistry:
             self._store.delete_capability(cap["id"])
         return removed or bool(cap)
 
+    def sync_mcp_rows(self) -> None:
+        """Reconcile MCP capability rows to ``mcp.json`` (the source of truth).
+
+        Fast and network-free: it does **not** connect to any server. Rows whose
+        server is missing from ``mcp.json`` are deleted; servers present in the file
+        but missing a row are inserted. Safe to call on every capabilities read so the
+        UI always reflects manual edits to ``mcp.json`` immediately.
+        """
+        from .mcp_client import read_mcp_config
+
+        present = {s.name for s in read_mcp_config(self._paths.mcp_json)}
+        existing = {row["name"]: row for row in self._store.list_capabilities(kind="mcp")}
+        # Prune rows for servers no longer in the file.
+        for name, row in existing.items():
+            if name not in present:
+                self._store.delete_capability(row["id"])
+        # Add rows for servers newly present in the file.
+        for name in present:
+            if name not in existing:
+                self._store.upsert_capability({
+                    "kind": "mcp", "name": name, "source_path": None,
+                    "description": f"MCP server '{name}'",
+                })
+
     def register_tool(self, spec: ToolSpec) -> None:
         """Register an external tool (custom python / MCP) by name."""
         self._extra_tools[spec.name] = spec

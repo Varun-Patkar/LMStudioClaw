@@ -90,6 +90,20 @@ def test_manual_mcp_removal_pruned_on_rescan(temp_app_paths):
     assert not any(c["name"] == "files" for c in store.list_capabilities("mcp"))
 
 
+def test_sync_mcp_rows_follows_json_both_ways(temp_app_paths):
+    """mcp.json is the source of truth: sync prunes removed + adds new, no network."""
+    registry, store = _registry(temp_app_paths)
+    # A server added directly to mcp.json appears after a sync (added to DB).
+    temp_app_paths.mcp_json.write_text(
+        '{\n  "mcpServers": { "added": { "command": "npx", "args": [] } }\n}\n', encoding="utf-8")
+    registry.sync_mcp_rows()
+    assert any(c["name"] == "added" for c in store.list_capabilities("mcp"))
+    # Removing it from the file prunes the DB row on the next sync.
+    temp_app_paths.mcp_json.write_text('{\n  "mcpServers": {}\n}\n', encoding="utf-8")
+    registry.sync_mcp_rows()
+    assert not any(c["name"] == "added" for c in store.list_capabilities("mcp"))
+
+
 def test_secret_isolated_from_agent(temp_app_paths):
     vault = SecretsVault(temp_app_paths.secrets_dir)
     vault.set("api_key", "super-secret", owner="mcp")
