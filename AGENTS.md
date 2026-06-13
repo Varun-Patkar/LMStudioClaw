@@ -32,7 +32,27 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full map and control flow.
 - **No idle polling.** Models are discovered on demand; the scheduler sleeps until the next
   fire (no busy loop). Do not add timers that poll LM Studio.
 - **One model at a time.** Sessions run through `sessions/queue.py` (FIFO, single active).
-  Every terminal session unloads the model.
+  Every terminal session unloads the model. The queue is **persisted** (`queued_runs`
+  table) and restored on startup; an interrupted in-progress run is recorded as
+  interrupted, not silently replayed.
+- **Default toolset (feature 002).** The agent's default tools are `read_file` (optional
+  line range), `list_dir`, `write_file`, `edit` (exact-string find/replace OR line-range
+  replace), `grep`, `find`, `powershell`, and `parallel` (≥2 independent sub-calls).
+  Handlers live in `capabilities/file_tools.py` / `shell_tool.py` / `parallel_tool.py`
+  to keep `registry.py` under the size limit. The agent should read the relevant section
+  of a file before editing it. `parallel` is for independent calls only — never two
+  edits to the same file.
+- **PowerShell shares the consent model.** The `powershell` tool starts in the workspace,
+  can reach already-consented folders, is bounded by a timeout + output truncation, and
+  raises the same consent prompt for paths outside consented folders; secrets/app
+  internals are always denied.
+- **Per-run config (feature 002).** Sessions and automations may carry a
+  `RunConfig{model, tool_overrides, mcp_selection}`. Resolution is **most-granular-wins**
+  (MCP selection picks servers, then per-tool overrides apply on top) and never mutates
+  global config. Skills are always global — never per-run toggles.
+- **Live UI, no polling.** App-wide status flows over `/ws/status` (`StatusHub`); the SPA
+  updates the run indicator/queue panel and "Load model" feedback from pushed events. Do
+  not add status polling timers. Content uses a fluid ~90vw layout (no fixed narrow cap).
 - **All agent file I/O goes through `consent/path_gate.py`.** Workspace is always allowed;
   the secrets area + app internals are a hard deny-list; grants are hierarchical and
   least-privilege (read ≠ write).

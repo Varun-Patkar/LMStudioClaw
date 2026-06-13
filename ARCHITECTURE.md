@@ -34,7 +34,11 @@ lmstudioclaw/
 │   ├── persona.py          # persona resolution (default + library)
 │   └── memory.py           # durable agent learnings (Documents memory/ area)
 ├── capabilities/
-│   ├── registry.py         # unified capability surface + built-in consent-gated fs tools
+│   ├── registry.py         # unified capability surface + default toolset + per-run effective_tools
+│   ├── run_config.py       # RunConfig: per-run model + tool overrides + MCP selection (002)
+│   ├── file_tools.py       # read(range)/list_dir/write/edit(exact|line-range)/grep/find (002)
+│   ├── shell_tool.py       # consent-gated, workspace-rooted PowerShell tool (002)
+│   ├── parallel_tool.py    # parallel meta-tool: run >=2 independent sub-calls concurrently (002)
 │   ├── skills.py           # SKILL.md discovery/validation + referenced scripts
 │   ├── tools.py            # custom python tools (trust gate, in-process exec)
 │   └── mcp_client.py       # MCP servers via the `mcp` SDK (isolated short-lived sessions)
@@ -43,20 +47,42 @@ lmstudioclaw/
 ├── automations/
 │   └── scheduler.py        # event-driven Daily/Interval scheduler + missed-run detection
 ├── sessions/
-│   ├── queue.py            # single-active-session FIFO
-│   └── store.py            # SQLite persistence (best-effort writes) + retention pruning
+│   ├── queue.py            # single-active-session FIFO, persisted + restored on startup (002)
+│   └── store.py            # SQLite (best-effort) + retention pruning + queued_runs + run_config
 ├── secrets/
 │   └── vault.py            # isolated secrets store (user-only writes, no agent read path)
 ├── notifications/
 │   └── toast.py            # Windows toast notifications (never contain secrets)
 ├── web/
-│   ├── api.py              # FastAPI app factory + static SPA mount + health
-│   ├── ws.py               # session WebSocket hub (streaming + steer/queue/stop/consent)
+│   ├── api.py              # FastAPI app factory + static SPA mount + /ws/status + health
+│   ├── ws.py               # session hub + StatusHub (app-wide live model/run/queue) (002)
 │   ├── routes_*.py         # REST route groups (sessions, automations, capabilities, settings)
-│   └── static/             # vanilla-JS SPA (app shell + per-area views)
+│   └── static/             # vanilla-JS SPA: fluid ~90vw layout, runbar + queue panel (002)
 └── tray/
     └── icon.py             # pystray tray: Open (browser) / Quit (graceful shutdown)
 ```
+
+## Feature 002 additions (UI, toolset, concurrency, per-run config)
+
+- **Default toolset** (`capabilities/file_tools.py`, `shell_tool.py`, `parallel_tool.py`):
+  `read_file` (optional line range), `list_dir`, `write_file`, `edit` (overloaded —
+  exact-string find/replace *or* line-range replace), `grep`, `find`, `powershell`
+  (workspace-rooted, consent-gated, timeout + truncation), and `parallel` (runs ≥2
+  independent sub-calls via `asyncio.gather`, rejecting same-target mutations). All
+  file/shell access still routes through `consent/path_gate.py`.
+- **Per-run config** (`capabilities/run_config.py`): `RunConfig{model, tool_overrides,
+  mcp_selection}` attached to sessions/automations. `CapabilityRegistry.effective_tools`
+  resolves the per-run toolset *most-granular-wins* (MCP selection → per-tool overrides)
+  without mutating global state; the engine uses it each turn. Skills are never per-run.
+- **Single-run concurrency, visible + durable**: the `SessionQueue` stays single-active
+  FIFO and now persists each run in `queued_runs`; `restore_from_store` re-enqueues
+  pending runs on startup and an interrupted in-progress run is reconciled (recorded as
+  interrupted, not silently replayed).
+- **Live UI**: a single app-wide `StatusHub` (`/ws/status`) pushes `model_status` /
+  `run_status` / `queue` events (no polling). The SPA shell mounts a top-right run
+  indicator + collapsible queue panel (`static/views/runbar.js`), uses a fluid ~90vw
+  layout, and gives non-blocking "Load model" feedback. The status channel replays a
+  full snapshot on (re)connect so the UI recovers after a dropped channel.
 
 ## Control flow (a session)
 

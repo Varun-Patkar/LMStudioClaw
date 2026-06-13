@@ -266,6 +266,14 @@ class Controller:
 
         persona = persona_mod.resolve(self.store, persona_id)
         parts = [persona.instructions]
+        # Tool-use guidance: read before editing so edits land correctly (FR-016).
+        parts.append(
+            "\n## Tool use\nBefore editing a file, read the relevant section first so "
+            "your edit targets the correct place. Use `edit` for precise in-place changes "
+            "(exact-string find/replace, or a line range) and `write_file` to create or "
+            "overwrite. Use `parallel` only for independent operations — never for two "
+            "edits to the same file."
+        )
         for skill in self.registry.enabled_skills():
             parts.append(f"\n## Skill: {skill.name}\n{skill.instructions}")
         learnings = memory_mod.load_learnings(self.paths.memory, scope)
