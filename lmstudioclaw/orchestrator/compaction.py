@@ -61,11 +61,15 @@ async def compact(
         # Too little to gain from compaction.
         return CompactionResult(messages, "", tokens_before, tokens_before)
 
-    to_summarize = body[:-_KEEP_RECENT]
-    recent = body[-_KEEP_RECENT:]
+    cut = _safe_cut(body, _KEEP_RECENT)
+    if cut <= 0:
+        # Everything recent is one indivisible tool exchange — nothing safe to drop.
+        return CompactionResult(messages, "", tokens_before, tokens_before)
+    to_summarize = body[:cut]
+    recent = body[cut:]
 
     transcript = "\n".join(
-        f"{m.get('role', '?')}: {m.get('content', '')}" for m in to_summarize
+        f"{m.get('role', '?')}: {_msg_text(m)}" for m in to_summarize
     )
     summary = await _summarize(transcript, model=model, client=client)
 
@@ -73,6 +77,36 @@ async def compact(
     new_messages = [*head, summary_msg, *recent]
     tokens_after = estimate_messages(new_messages)
     return CompactionResult(new_messages, summary, tokens_before, tokens_after)
+
+
+def _msg_text(msg: dict) -> str:
+    """Best-effort readable text for a message (incl. tool-call names) for summaries."""
+    content = msg.get("content") or ""
+    if isinstance(content, list):
+        content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
+    calls = msg.get("tool_calls") or []
+    if calls:
+        names = ", ".join(c.get("function", {}).get("name", "?") for c in calls if isinstance(c, dict))
+        content = f"{content} [called: {names}]".strip()
+    return str(content)
+
+
+def _safe_cut(body: list[dict], keep_recent: int) -> int:
+    """Return an index splitting ``body`` so the kept tail never orphans a tool call.
+
+    The OpenAI chat API requires every assistant message that has ``tool_calls`` to be
+    immediately followed by the ``tool`` results answering each call. A naive
+    ``body[-keep_recent:]`` slice can start on an orphaned ``tool`` message (its
+    assistant request summarized away) or end the summarized half on a dangling
+    assistant ``tool_calls`` (its results kept). We move the boundary **earlier** until
+    the kept tail starts cleanly (not on a ``tool`` message) so the pairing stays intact.
+    """
+    cut = max(0, len(body) - keep_recent)
+    # Walk the boundary back while the first kept message is a tool result (its
+    # assistant tool_calls would otherwise be on the summarized side).
+    while cut > 0 and body[cut].get("role") == "tool":
+        cut -= 1
+    return cut
 
 
 async def _summarize(transcript: str, *, model: str, client: AsyncOpenAI) -> str:

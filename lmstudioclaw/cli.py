@@ -61,6 +61,7 @@ def _run() -> None:
     controller = Controller()
     port = _find_free_port(controller.settings.web_port)
     controller.served_url = f"http://localhost:{port}"
+    controller.served_port = port
 
     app = create_app(controller)
     server = uvicorn.Server(

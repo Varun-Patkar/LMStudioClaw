@@ -198,6 +198,10 @@ export default function SessionDetail() {
           break;
         }
         case "budget": setBudget(evt); break;
+        case "user_message":
+          // The seeded first prompt (or an automation task) echoed by the engine.
+          if (evt.text) setMessages((ms) => [...ms, { id: uid(), role: "user", content: evt.text }]);
+          break;
         case "compaction":
           finalizeStreaming();
           setMessages((ms) => [...ms, { id: uid(), role: "system", content: `Context compacted: ${evt.tokens_before} → ${evt.tokens_after} tokens` }]);

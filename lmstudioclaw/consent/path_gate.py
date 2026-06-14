@@ -83,6 +83,10 @@ class PathGate:
         # is always evaluated first below (FR-020/FR-077).
         self._base = _canon(paths.base)
         self._deny_list = tuple(_canon(p) for p in paths.deny_list)
+        # The active session id, set by the runner before a run, so session-scoped
+        # grants apply on a file tool's gate check (which doesn't pass session_id).
+        # Only one session runs at a time (FR-008), so a single field is sufficient.
+        self.current_session_id: str | None = None
 
     def _access_satisfies(self, granted: str, requested: Access) -> bool:
         """Least-privilege: a read grant cannot authorize a write (FR-070)."""
@@ -103,8 +107,20 @@ class PathGate:
         For interactive sessions an uncovered path yields ``NEEDS_CONSENT`` with a
         ``request_id``. For unattended automations the same case yields ``DENY``
         (fail-fast, FR-025).
+
+        A **relative** ``path`` is resolved against the agent's home base (not the
+        controller's working directory), so the agent referring to ``mcp.json`` or
+        ``workspace/`` reaches its own home files (which are implicitly allowed)
+        instead of an unrelated path that would prompt.
         """
-        target = _canon(path)
+        # Resolve relative inputs against the agent's home so they land in-home.
+        raw = Path(path)
+        target = _canon(raw if raw.is_absolute() else self._base / raw)
+
+        # Default to the active session so session-scoped grants are honoured even when
+        # the caller (a file tool) does not thread the id through.
+        if session_id is None:
+            session_id = self.current_session_id
 
         # 1. Hard deny-list: secrets area + app internals, regardless of grants.
         for denied in self._deny_list:

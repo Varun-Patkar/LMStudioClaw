@@ -14,6 +14,44 @@ stop, automatic context compaction) using enabled skills/tools/MCP servers withi
 hierarchical, least-privilege folder-consent boundary, then unloads the model and
 records the session. Exactly one session runs at a time (FIFO queue).
 
+```mermaid
+flowchart LR
+    subgraph Desktop["Windows desktop"]
+        Tray["System tray<br/>(open / quit)"]
+        Browser["Browser<br/>React SPA"]
+        Phone["Phone<br/>(QR dev tunnel)"]
+    end
+
+    subgraph Controller["Resident controller (FastAPI + uvicorn)"]
+        API["REST + WebSocket API"]
+        Queue["SessionQueue<br/>(single-active FIFO)"]
+        Engine["Orchestrator engine<br/>(turn loop)"]
+        Registry["Capability registry<br/>(tools / skills / MCP)"]
+        Gate["Consent path gate"]
+        Sched["Scheduler<br/>(Daily / Interval)"]
+        Store["SQLite store"]
+        Vault["Secrets vault<br/>(isolated)"]
+    end
+
+    subgraph External["External"]
+        LM["LM Studio<br/>(native + /v1)"]
+        MCP["MCP servers<br/>(stdio / HTTP)"]
+        FS["Filesystem"]
+    end
+
+    Tray --> API
+    Browser <--> API
+    Phone <--> API
+    API --> Queue --> Engine
+    Sched --> Queue
+    Engine --> Registry --> Gate --> FS
+    Engine <--> LM
+    Registry <--> MCP
+    Registry -. "resolve ${secret:…}" .-> Vault
+    Engine --> Store
+    API --> Store
+```
+
 ## Module map
 
 ```text
@@ -55,11 +93,47 @@ lmstudioclaw/
 │   └── toast.py            # Windows toast notifications (never contain secrets)
 ├── web/
 │   ├── api.py              # FastAPI app factory + static SPA mount + /ws/status + health
+│   ├── tunnel.py           # opt-in VS Code dev tunnel + QR ("See this on your phone")
 │   ├── ws.py               # session hub + StatusHub (app-wide live model/run/queue) (002)
 │   ├── routes_*.py         # REST route groups (sessions, automations, capabilities, settings)
 │   └── static/             # built React SPA (from frontend/): fluid ~90vw, runbar + queue panel (002)
 └── tray/
     └── icon.py             # pystray tray: Open (browser) / Quit (graceful shutdown)
+```
+
+### Module relationships
+
+```mermaid
+flowchart TD
+    cli["cli.py"] --> app["app.py<br/>Controller"]
+    app --> queue["sessions/queue.py"]
+    app --> engine["orchestrator/engine.py"]
+    app --> registry["capabilities/registry.py"]
+    app --> sched["automations/scheduler.py"]
+    app --> store["sessions/store.py"]
+    app --> vault["secrets/vault.py"]
+    app --> web["web/* (api, ws, routes_*, tunnel)"]
+
+    engine --> registry
+    engine --> budget["orchestrator/budget.py"]
+    engine --> compaction["orchestrator/compaction.py"]
+    engine --> persona["orchestrator/persona.py"]
+    engine --> memory["orchestrator/memory.py"]
+
+    registry --> filetools["capabilities/file_tools.py"]
+    registry --> shell["capabilities/shell_tool.py"]
+    registry --> parallel["capabilities/parallel_tool.py"]
+    registry --> skills["capabilities/skills.py"]
+    registry --> tools["capabilities/tools.py"]
+    registry --> mcp["capabilities/mcp_client.py"]
+    registry --> runcfg["capabilities/run_config.py"]
+
+    filetools --> gate["consent/path_gate.py"]
+    shell --> gate
+    registry -. "resolve secrets" .-> vault
+    mcp -. "resolve secrets" .-> vault
+    queue --> store
+    sched --> store
 ```
 
 ## Feature 002 additions (UI, toolset, concurrency, per-run config)
@@ -108,6 +182,31 @@ lmstudioclaw/
   (re)connect, so a reloaded mid-run session shows the token gauge and correct Stop-turn
   state immediately (no `0/0` until the next turn).
 
+## Later refinements (MCP, secrets, mobile, QoL)
+
+- **MCP per-tool granularity**: MCP tool lists (name + description) are persisted in the
+  capability row `metadata` on connect, so the run-config UI renders a server→tools tree
+  (VS Code style) with hover descriptions. Unchecking a tool adds
+  `tool_overrides["{server}__{tool}"]=false`; unchecking a server drops it from
+  `mcp_selection`. `/api/tools` returns the per-server tool detail.
+- **MCP input/output cards**: MCP `ToolResult.meta` carries `server`/`tool` + `input`/
+  `output`; `ToolCard.jsx` shows an expandable input→output panel.
+- **Windows command launch**: `mcp_client._resolve_stdio_command` resolves a stdio
+  `command` on PATH and runs `.cmd`/`.bat` shims (e.g. `npx`) via `cmd /c` (fixes
+  `WinError 193`); `open-in-vscode` does the same for the `code` launcher.
+- **Robust MCP errors**: anyio `ExceptionGroup`s from the SDK are flattened to the real
+  cause; a `connect_failed` server shows the reason + **Fix in VS Code**.
+- **Secret lifecycle**: secrets can be renamed/updated (write-only) via `PATCH
+  /api/secrets/{ref}`; a rename rewrites `${secret:OLD}` references in `mcp.json`. The
+  UI prompts for any `${secret:…}` referenced but not yet stored (`/api/secrets/missing`).
+- **Phone tunnel** (`web/tunnel.py`): opt-in VS Code dev tunnel
+  (`devtunnel host -p <port> --allow-anonymous`) + a `qrcode` SVG, exposed via
+  `/api/tunnel[/start|/stop]`; stopped on shutdown.
+- **Start-with-a-prompt**: a manual session can carry an `initial_message` delivered as
+  the first user turn (echoed live via a `user_message` event).
+- **Responsive UI**: `frontend/src/theme.css` collapses the layout for phones/tablets
+  (stacked nav dropdown, tables → cards, single-column diffs/IO, full-width composer).
+
 ## Control flow (a session)
 
 1. `web/routes_sessions.py` (manual) or `automations/scheduler.py` (automation) asks the
@@ -123,6 +222,59 @@ lmstudioclaw/
    - on any terminal state **always unloads the model** and clears session-scoped grants,
    - records the result and prunes old history.
 4. Events flow `Engine → on_event → SessionHub.broadcast → WebSocket → browser`.
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant UI as React UI
+    participant API as REST/WS
+    participant Q as SessionQueue
+    participant R as Runner
+    participant LM as ModelLifecycle
+    participant E as Engine
+    participant Reg as Registry/Tools
+    participant LS as LM Studio
+
+    User->>UI: Start session (model, prompt, run config)
+    UI->>API: POST /api/sessions
+    API->>Q: enqueue(runner)
+    Q->>R: run (single-active)
+    R->>LM: load(model)
+    LM-->>R: ready
+    R->>E: run_session(...)
+    loop each turn
+        E->>LS: stream completion
+        LS-->>E: tokens / tool calls
+        E->>Reg: invoke tool (consent-gated)
+        Reg-->>E: result (+ display meta)
+        E-->>UI: token / tool_call / tool_result / budget (WS)
+    end
+    E-->>R: SessionResult
+    R->>LM: unload(model)
+    R-->>UI: status: completed (WS)
+```
+
+## Consent path gate
+
+Every agent file/shell access is authorized by `consent/path_gate.py`. The deny-list is
+evaluated **first**, so it always wins; the workspace and the whole
+`Documents/LMStudioClaw` home are allowed without a prompt; other paths are checked
+against hierarchical, least-privilege grants and otherwise prompt (interactive) or
+fail-fast (unattended automations).
+
+```mermaid
+flowchart TD
+    Start["authorize(path, access)"] --> Canon["Canonicalize<br/>(resolve .. + symlinks)"]
+    Canon --> Deny{"Under secrets /<br/>app internals?"}
+    Deny -- yes --> D["DENY (always)"]
+    Deny -- no --> Home{"Under workspace or<br/>Documents/LMStudioClaw home?"}
+    Home -- yes --> A["ALLOW"]
+    Home -- no --> Grant{"Covered by an active grant<br/>with sufficient access?"}
+    Grant -- yes --> A
+    Grant -- no --> Mode{"Unattended run?"}
+    Mode -- yes --> D2["DENY (fail-fast)"]
+    Mode -- no --> Prompt["NEEDS_CONSENT<br/>(prompt: session / permanent / deny)"]
+```
 
 ## Integration points
 

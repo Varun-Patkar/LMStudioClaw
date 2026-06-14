@@ -15,6 +15,7 @@ dependencies = [
     "mcp",
     "tiktoken",
     "win11toast",
+    "qrcode",
 ]
 
 [project.optional-dependencies]

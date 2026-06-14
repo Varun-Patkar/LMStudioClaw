@@ -74,6 +74,26 @@ class SecretsVault:
             del data[ref_name]
             self._write(data)
 
+    def rename(self, old_ref: str, new_ref: str, value: str | None = None) -> bool:
+        """Rename a secret (and optionally replace its value). **User-initiated only.**
+
+        Returns ``False`` if ``old_ref`` does not exist, or if ``new_ref`` already
+        exists and differs from ``old_ref`` (caller surfaces a conflict). When
+        ``value`` is ``None`` the existing value is preserved; otherwise it is
+        replaced. The owner is preserved.
+        """
+        data = self._read()
+        if old_ref not in data:
+            return False
+        if new_ref != old_ref and new_ref in data:
+            return False
+        entry = dict(data.pop(old_ref))
+        if value is not None:
+            entry["value"] = value
+        data[new_ref] = entry
+        self._write(data)
+        return True
+
     # -- safe metadata (no values, FR-026) ---------------------------------
 
     def list_refs(self) -> list[dict[str, str]]:

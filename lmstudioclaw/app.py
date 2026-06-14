@@ -30,6 +30,7 @@ from .orchestrator.engine import Engine, SessionResult
 from .secrets.vault import SecretsVault
 from .sessions.queue import SessionQueue
 from .sessions.store import Store
+from .web.tunnel import TunnelManager
 from .web.ws import SessionHub, StatusHub
 
 
@@ -65,6 +66,9 @@ class Controller:
         self._queue_task: asyncio.Task | None = None
         self._scheduler_task: asyncio.Task | None = None
         self.served_url: str = f"http://localhost:{self.settings.web_port}"
+        self.served_port: int = self.settings.web_port
+        # Public-URL tunnel for "See this on your phone" (started on demand).
+        self.tunnel = TunnelManager()
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -108,6 +112,10 @@ class Controller:
             pass
         try:
             await self.engine.aclose()
+        except Exception:
+            pass
+        try:
+            self.tunnel.stop()
         except Exception:
             pass
         self.http.close()
@@ -352,6 +360,7 @@ class Controller:
     def start_manual_session(
         self, *, model: str | None = None, persona_id: str | None = None,
         run_config: "RunConfig | None" = None, resume_session_id: str | None = None,
+        initial_message: str | None = None,
     ) -> tuple[str, int]:
         """Create and enqueue a manual interactive session. Returns (id, position).
 
@@ -360,12 +369,14 @@ class Controller:
         survives a restart (FR-025a/FR-030b). When ``resume_session_id`` is given, the
         prior session's conversation is carried forward: its turns are copied into the
         new session (so the transcript shows) and seeded as engine history so the model
-        continues with full context.
+        continues with full context. An optional ``initial_message`` is delivered as the
+        first user turn so the agent starts processing as soon as the session runs.
         """
         chosen_model = (run_config.model if run_config and run_config.model else model)
         model_key, ctx = self._resolve_model(chosen_model)
         rc_dict = run_config.to_dict() if run_config else None
         history = self._session_history(resume_session_id) if resume_session_id else None
+        first_message = (initial_message or "").strip() or None
         session_id = self.store.create_session(
             trigger_type="manual", model_key=model_key, persona_id=persona_id,
             session_mode="ephemeral", context_length=ctx, run_config=rc_dict,
@@ -381,11 +392,13 @@ class Controller:
         self.hub.register(session_id)
         runner = self._make_runner(
             session_id, model_key=model_key, persona_id=persona_id, context_length=ctx,
-            unattended=False, initial_message=None, run_config=run_config, history=history,
+            unattended=False, initial_message=first_message, run_config=run_config,
+            history=history,
         )
         position = self.queue.enqueue(
             session_id, runner,
-            persist={"trigger_type": "manual", "run_config": rc_dict, "initial_message": None},
+            persist={"trigger_type": "manual", "run_config": rc_dict,
+                     "initial_message": first_message},
         )
         self._schedule_status()
         return session_id, position
@@ -449,6 +462,9 @@ class Controller:
             control = self.hub.register(session_id)
             scope = automation_id or "global"
             self._prepare_registry(scope)
+            # Bind the gate to this run so session-scoped folder grants apply to the
+            # file tools' consent checks (single active run, FR-008).
+            self.gate.current_session_id = session_id
 
             async def on_event(event: dict) -> None:
                 await self.hub.broadcast(session_id, event)
@@ -503,6 +519,8 @@ class Controller:
                 except Exception:
                     pass
                 self.store.clear_session_grants(session_id)
+                if self.gate.current_session_id == session_id:
+                    self.gate.current_session_id = None
 
             self._finish_notify(result, automation_id)
             self.store.prune(self.settings.retention_days)

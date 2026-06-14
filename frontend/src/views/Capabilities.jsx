@@ -97,6 +97,18 @@ export default function Capabilities() {
     catch (e) { toast(e.message); }
   };
   const delSecret = async (name) => { try { await del(`/api/secrets/${encodeURIComponent(name)}`); load(); } catch (e) { toast(e.message); } };
+  // Rename a secret and/or replace its value (blank value keeps the existing one).
+  const updateSecret = async (oldRef, newRef, value) => {
+    if (!newRef) { toast("A reference name is required."); return false; }
+    if (newRef === oldRef && !value) { toast("Enter a new value or a new name."); return false; }
+    try {
+      await api("PATCH", `/api/secrets/${encodeURIComponent(oldRef)}`,
+        { new_ref: newRef, value: value || null });
+      toast("Secret updated.");
+      load();
+      return true;
+    } catch (e) { toast(e.message); return false; }
+  };
   // Save a value for a secret ref that mcp.json/tools reference but the vault lacks yet.
   const fillMissing = async (ref, value) => {
     if (!value) return toast("Enter a value for " + ref + ".");
@@ -163,13 +175,13 @@ export default function Capabilities() {
 
       <div className="card">
         <div className="card-head"><h3>Secrets</h3></div>
-        <p className="muted">Values are write-only and never shown. The agent cannot read them.</p>
+        <p className="muted">Values are write-only and never shown. The agent cannot read them.
+          You can rename a secret or replace its value with <strong>Edit</strong>.</p>
         {data.secrets.length > 0 && (
           <table>
             <thead><tr><th>Reference</th><th>Owner</th><th /></tr></thead>
             <tbody>{data.secrets.map((s) => (
-              <tr key={s.ref_name}><td>{s.ref_name}</td><td>{s.owner}</td>
-                <td><button className="btn red" onClick={() => delSecret(s.ref_name)}>Delete</button></td></tr>
+              <SecretRow key={s.ref_name} s={s} onUpdate={updateSecret} onDelete={delSecret} />
             ))}</tbody>
           </table>
         )}
@@ -193,5 +205,47 @@ function MissingSecret({ refName, onSave }) {
         value={value} onChange={(e) => setValue(e.target.value)} />
       <button className="btn green" onClick={() => onSave(refName, value)}>Save</button>
     </div>
+  );
+}
+
+/**
+ * A secret row that can be edited in place: rename the reference and/or replace the
+ * (write-only) value. Leaving the value blank keeps the existing one.
+ */
+function SecretRow({ s, onUpdate, onDelete }) {
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(s.ref_name);
+  const [value, setValue] = useState("");
+
+  if (!editing) {
+    return (
+      <tr>
+        <td>{s.ref_name}</td>
+        <td>{s.owner}</td>
+        <td>
+          <div className="row">
+            <button className="btn ghost" onClick={() => { setName(s.ref_name); setValue(""); setEditing(true); }}>Edit</button>
+            <button className="btn red" onClick={() => onDelete(s.ref_name)}>Delete</button>
+          </div>
+        </td>
+      </tr>
+    );
+  }
+  return (
+    <tr>
+      <td><input value={name} onChange={(e) => setName(e.target.value)} placeholder="Reference name" /></td>
+      <td>{s.owner}</td>
+      <td>
+        <div className="row wrap">
+          <input type="password" value={value} onChange={(e) => setValue(e.target.value)}
+            placeholder="New value (blank = keep)" />
+          <button className="btn green" onClick={async () => {
+            const ok = await onUpdate(s.ref_name, name.trim(), value);
+            if (ok) setEditing(false);
+          }}>Save</button>
+          <button className="btn ghost" onClick={() => setEditing(false)}>Cancel</button>
+        </div>
+      </td>
+    </tr>
   );
 }

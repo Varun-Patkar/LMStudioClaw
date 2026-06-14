@@ -9,6 +9,7 @@ export default function Sessions() {
   const [data, setData] = useState(null);
   const [model, setModel] = useState("");
   const [persona, setPersona] = useState("");
+  const [prompt, setPrompt] = useState("");
   const [runCfg, setRunCfg] = useState(null);
   const [busy, setBusy] = useState(false);
   const navigate = useNavigate();
@@ -31,7 +32,10 @@ export default function Sessions() {
   const start = async () => {
     setBusy(true);
     try {
-      const res = await post("/api/sessions", { model: model || null, persona_id: persona || null, run_config: runCfg });
+      const res = await post("/api/sessions", {
+        model: model || null, persona_id: persona || null, run_config: runCfg,
+        initial_message: prompt.trim() || null,
+      });
       navigate(`/sessions/${res.session_id}`);
     } catch (e) { toast(e.message); } finally { setBusy(false); }
   };
@@ -63,6 +67,9 @@ export default function Sessions() {
             {busy ? <><span className="spinner" /> Starting…</> : "Start session"}
           </button>
         </div>
+        <textarea className="session-prompt" value={prompt} rows={3}
+          placeholder="Optional: first message — the agent starts on it as soon as the session runs"
+          onChange={(e) => setPrompt(e.target.value)} />
         <RunConfig models={models} defaultModel={settings.default_model} onChange={setRunCfg} />
       </div>
 

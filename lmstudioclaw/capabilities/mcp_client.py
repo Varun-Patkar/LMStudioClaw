@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import shutil
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -177,6 +179,29 @@ def _run_isolated(coro_factory):
     return result.get("value")
 
 
+def _resolve_stdio_command(command: str, args: list[str]) -> tuple[str, list[str]]:
+    """Resolve a stdio command to something Windows can actually spawn.
+
+    On Windows, tools like ``npx`` are ``npx.cmd`` batch shims, and ``uvx``/``pnpm``
+    similar — spawning them directly raises ``WinError 193`` ("not a valid Win32
+    application"). ``shutil.which("npx")`` can also return the **extensionless** shell
+    wrapper (e.g. from Git Bash), which is equally unspawnable. We therefore prefer the
+    ``.cmd``/``.exe`` launcher, and run anything that isn't a real ``.exe`` through
+    ``cmd /c`` so the same config that works in VS Code / GitHub Copilot works here too.
+    Non-Windows and absolute paths are passed through unchanged.
+    """
+    if os.name != "nt":
+        return command, args
+
+    # Prefer the .cmd/.exe launcher over an extensionless shell wrapper.
+    resolved = (shutil.which(command + ".cmd") or shutil.which(command + ".exe")
+                or shutil.which(command) or command)
+    if not resolved.lower().endswith(".exe"):
+        # A .cmd/.bat shim (or any non-.exe) must run via the command interpreter.
+        return "cmd", ["/c", resolved, *args]
+    return resolved, args
+
+
 async def _with_session(server: McpServer, action):
     """Open a short-lived MCP session to ``server`` and run ``action(session)``.
 
@@ -193,8 +218,9 @@ async def _with_session(server: McpServer, action):
 
         if not server.command:
             raise RuntimeError("stdio MCP server is missing a 'command'.")
+        command, args = _resolve_stdio_command(server.command, server.args)
         params = StdioServerParameters(
-            command=server.command, args=server.args, env=server.env or None)
+            command=command, args=args, env=server.env or None)
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()

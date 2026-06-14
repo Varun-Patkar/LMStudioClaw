@@ -76,7 +76,11 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full map and control flow.
   optional auth `headers` (e.g. `{"Authorization": "Bearer <token>"}`). Transport is
   resolved in `capabilities/mcp_client.py` (`McpServer.transport`); auth keys live only
   in `headers` and are never logged. The Capabilities UI form switches fields by
-  transport and parses `Key: Value` header lines.
+  transport and parses `Key: Value` header lines. On Windows, a stdio `command` is
+  resolved on PATH and `.cmd`/`.bat` shims (e.g. `npx`) run via `cmd /c`
+  (`_resolve_stdio_command`) so the same config that works in VS Code works here; the
+  `open-in-vscode` launcher does the same for `code`. SDK `ExceptionGroup`s are flattened
+  to the real cause so a failed server shows a useful reason.
 - **Tool actions are shown, not named.** File tools attach display-only `meta` to
   `ToolResult` (action + before/after content); MCP tools attach `meta` with the
   server/tool + `input`/`output`. The engine forwards it on the `tool_result` event and
@@ -142,7 +146,8 @@ controller. The build wipes `web/static/` and regenerates `index.html` + `assets
 ## Editing rules (from repo global instructions)
 
 - Markdown files allowed: `README.md`, `AGENTS.md`, **and `ARCHITECTURE.md`** (the latter is
-  a required deliverable per Constitution v1.1.0). Do not add other `.md` docs.
+  a required deliverable per Constitution v1.1.0). Do not add other `.md` docs. README
+  screenshots live in `docs/images/` (binary assets only — not a docs site).
 - Keep modules ≤ ~500 meaningful lines; split a growing module into a new file rather than
   letting it balloon (`web/api.py` is already split into `routes_*.py`).
 - Don't pin dependency versions in `pyproject.toml` unless asked; suggest the install command.

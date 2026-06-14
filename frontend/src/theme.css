@@ -302,6 +302,7 @@ tbody tr:hover { background: var(--bg-elev-2); }
 @keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
 
 .run-config { border: 1px solid var(--border); border-radius: var(--radius); padding: var(--s4); margin-top: var(--s3); background: var(--bg-elev-2); }
+.session-prompt { display: block; width: 100%; margin-top: var(--s3); resize: vertical; min-height: 64px; line-height: 1.5; }
 .run-config > summary { cursor: pointer; font-weight: 600; }
 .run-config .field { display: flex; flex-direction: column; gap: var(--s1); margin-top: var(--s3); }
 .run-config label.check { display: flex; align-items: center; gap: var(--s2); font-size: 13px; }
@@ -324,10 +325,48 @@ tbody tr:hover { background: var(--bg-elev-2); }
   :root { --content-width: 92vw; }
   .topbar { gap: var(--s3); padding: var(--s3) var(--s4); flex-wrap: wrap; }
   .nav-toggle { display: inline-flex; background: var(--bg-input); color: var(--fg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: var(--s2) var(--s3); cursor: pointer; font-size: 18px; line-height: 1; }
-  .nav { display: none; flex-basis: 100%; flex-direction: column; }
+  /* Stack the nav as a clean dropdown panel (the pill shape only suits a horizontal row). */
+  .nav { display: none; flex-basis: 100%; flex-direction: column; gap: var(--s1); padding: var(--s2); border-radius: var(--radius); }
   .nav.open { display: flex; }
-  .nav a { width: 100%; }
+  .nav a { width: 100%; border-radius: var(--radius-sm); padding: var(--s3) var(--s3); }
   .queue-panel { position: fixed; left: 4vw; right: 4vw; min-width: 0; max-width: none; }
   .msg { max-width: 95%; }
   .set-field { grid-template-columns: 1fr; gap: var(--s2); }
+}
+
+/* See-this-on-your-phone QR card */
+.phone-qr { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s5); }
+.phone-qr .qr { display: inline-flex; background: #fff; padding: 10px; border-radius: var(--radius-sm); box-shadow: var(--shadow); }
+.phone-qr .qr svg { display: block; width: 200px; height: 200px; }
+.phone-qr-info { min-width: 220px; flex: 1; display: flex; flex-direction: column; gap: var(--s2); }
+.phone-qr-info a { color: var(--accent); word-break: break-all; }
+
+/* Broader responsive polish (phones + small tablets) */
+@media (max-width: 720px) {
+  .topbar h1 { font-size: 16px; }
+  .topbar .runbar { order: 3; }
+  .view { padding: var(--s4) 0; gap: var(--s3); }
+  .card { padding: var(--s4); border-radius: var(--radius-sm); }
+  .card > .card-head { flex-wrap: wrap; gap: var(--s2); }
+  .row.wrap { gap: var(--s2); }
+  .row.wrap > input, .row.wrap > select, .row.wrap > textarea { flex: 1 1 100%; min-width: 0; }
+  .row.wrap > button.btn { flex: 1 1 auto; justify-content: center; }
+  .set-field > input:not(.switch), .set-field > select, .set-field > textarea { max-width: none; }
+  table, thead, tbody, th, td, tr { display: block; }
+  thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  tbody tr { border: 1px solid var(--border); border-radius: var(--radius-sm); margin-bottom: var(--s2); padding: var(--s2); }
+  tbody tr td { border: none; padding: var(--s1) var(--s2); }
+  .composer { flex-direction: column; }
+  .composer .btn { width: 100%; justify-content: center; }
+  .tool-grid { grid-template-columns: 1fr 1fr; }
+  .io { grid-template-columns: 1fr; }
+  .io-col { border-right: none; border-bottom: 1px solid var(--border); }
+  .diff-row { grid-template-columns: 32px 1fr; }
+  .diff-row .diff-gutter:first-child, .diff-row .diff-cell.left { display: none; }
+  .run-config { padding: var(--s3); }
+  .phone-qr { justify-content: center; }
+}
+@media (max-width: 420px) {
+  .tool-grid { grid-template-columns: 1fr; }
+  .phone-qr .qr svg { width: 168px; height: 168px; }
 }

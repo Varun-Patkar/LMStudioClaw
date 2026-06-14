@@ -1,0 +1,13 @@
+# Place screenshots / GIFs referenced by README.md here.
+#
+# Files referenced from the README "Visual tour" section (GIF):
+#   sessions.gif        — Sessions list + New session (model/persona/prompt/run-config)
+#   session-live.gif     — A live session: streaming reply, tool cards, token gauge
+#   tool-cards.gif       — Tool-action cards (read/edit diff, MCP input→output)
+#   run-config.gif       — Per-run config: model + per-tool + per-server/tool MCP tree
+#   capabilities.gif     — Skills & Tools: MCP servers, secrets, missing-secret prompt
+#   automations.gif      — Automations: Daily/Interval schedule + run config
+#   settings.gif         — Settings + "See this on your phone" QR tunnel
+#   mobile.gif           — Mobile/responsive view
+#
+# Keep assets reasonably sized (e.g. <= 1600px wide) so the repo stays lean.

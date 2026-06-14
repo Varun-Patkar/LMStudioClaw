@@ -48,6 +48,8 @@ export default function Settings() {
         </Field>
       </div>
 
+      <PhoneAccess />
+
       {/* Runtime */}
       <div className="card">
         <div className="card-head"><h2>Runtime</h2></div>
@@ -84,6 +86,61 @@ export default function Settings() {
       <Personas personas={personas} reload={load} />
       <ModelManagement modelsResp={modelsResp} reload={load} />
     </>
+  );
+}
+
+/**
+ * "See this on your phone" — start a public Cloudflare tunnel and show a QR code the
+ * user can scan (camera / Google Lens) to open the controller on their phone.
+ */
+function PhoneAccess() {
+  const toast = useToast();
+  const [state, setState] = useState({ running: false, url: null, qr_svg: null });
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => { get("/api/tunnel").then(setState).catch(() => {}); }, []);
+
+  const start = async () => {
+    setBusy(true);
+    try { setState(await post("/api/tunnel/start", {})); }
+    catch (e) { toast(e.message); } finally { setBusy(false); }
+  };
+  const stop = async () => {
+    setBusy(true);
+    try { setState(await post("/api/tunnel/stop", {})); }
+    catch (e) { toast(e.message); } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="card">
+      <div className="card-head"><h2>See this on your phone</h2></div>
+      <p className="muted">
+        Opens a temporary public link to this control panel via a VS Code dev tunnel.
+        Scan the QR code with your phone’s camera or Google Lens to open it. The link
+        stays active until you stop it or quit the app. Requires the <code>devtunnel</code>
+        CLI (run <code>devtunnel user login</code> once).
+      </p>
+      {state.running ? (
+        <>
+          <div className="phone-qr">
+            {state.qr_svg
+              ? <span className="qr" dangerouslySetInnerHTML={{ __html: state.qr_svg }} />
+              : <p className="muted">{state.qr_error || "QR unavailable."}</p>}
+            <div className="phone-qr-info">
+              <p>Scan to open on your phone, or visit:</p>
+              <a href={state.url} target="_blank" rel="noreferrer"><code>{state.url}</code></a>
+              <div className="row">
+                <button className="btn red" disabled={busy} onClick={stop}>
+                  {busy ? <><span className="spinner" /> Stopping…</> : "Stop sharing"}</button>
+              </div>
+            </div>
+          </div>
+        </>
+      ) : (
+        <button className="btn green" disabled={busy} onClick={start}>
+          {busy ? <><span className="spinner" /> Starting tunnel…</> : "Show on my phone"}</button>
+      )}
+    </div>
   );
 }
 
@@ -126,7 +183,9 @@ function PersonaRow({ p, reload }) {
 
 function ModelManagement({ modelsResp, reload }) {
   const toast = useToast();
-  const [ctx, setCtx] = useState(() => Object.fromEntries((modelsResp.models || []).map((m) => [m.key, m.max_context_length])));
+  // Seed each input from the saved preference (falling back to model max) so a
+  // previously pinned context length survives reloads instead of appearing reset.
+  const [ctx, setCtx] = useState(() => Object.fromEntries((modelsResp.models || []).map((m) => [m.key, m.preferred_context_length ?? m.max_context_length])));
   const [loadingKey, setLoadingKey] = useState(null);
   const [unloading, setUnloading] = useState(false);
   const anyLoaded = (modelsResp.models || []).some((m) => m.is_loaded);

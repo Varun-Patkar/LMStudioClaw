@@ -45,13 +45,24 @@ def estimate_tokens(text: str) -> int:
 
 
 def estimate_messages(messages: list[dict]) -> int:
-    """Estimate tokens for a list of chat messages (content + small per-message overhead)."""
+    """Estimate tokens for a list of chat messages.
+
+    Counts each message's text content plus a small per-message framing overhead, and
+    — importantly — the serialized ``tool_calls`` on assistant messages, since a tool
+    call's arguments (and the large tool results that follow) consume real context and
+    must count toward the compaction threshold (FR-061/FR-067).
+    """
     total = 0
     for msg in messages:
         content = msg.get("content") or ""
         if isinstance(content, list):
             content = " ".join(part.get("text", "") for part in content if isinstance(part, dict))
         total += estimate_tokens(str(content)) + 4  # per-message framing overhead
+        # Assistant tool-call requests carry their name + JSON arguments in lieu of
+        # text content; estimate those too so they are not invisible to the budget.
+        for call in msg.get("tool_calls") or []:
+            fn = call.get("function", {}) if isinstance(call, dict) else {}
+            total += estimate_tokens(str(fn.get("name", "")) + str(fn.get("arguments", "")))
     return total
 
 

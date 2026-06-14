@@ -24,6 +24,18 @@ def test_estimate_messages_sums_content():
     assert estimate_messages(msgs) >= estimate_tokens("hello")
 
 
+def test_estimate_messages_counts_tool_calls():
+    """An assistant tool-call message (no text content) still consumes budget."""
+    args = '{"query": "a fairly long search query that costs tokens to encode"}'
+    msgs = [
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"id": "1", "type": "function",
+                         "function": {"name": "web_search", "arguments": args}}]},
+    ]
+    # Must be at least the tokens of the serialized arguments (plus framing).
+    assert estimate_messages(msgs) >= estimate_tokens(args)
+
+
 def test_allocation_does_not_exceed_total():
     budget = allocate(10000)
     assert sum(budget.alloc.values()) <= budget.total

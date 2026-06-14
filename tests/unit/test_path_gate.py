@@ -93,6 +93,36 @@ def test_unattended_fails_fast_without_grant(temp_app_paths, tmp_path):
     assert decision.kind == DecisionKind.DENY
 
 
+def test_relative_path_resolves_against_home(temp_app_paths):
+    # The agent referring to "mcp.json" / "workspace/" hits its own home (allowed),
+    # not the controller's working directory.
+    gate = _gate(temp_app_paths)
+    assert gate.authorize("mcp.json", Access.READ_WRITE).kind == DecisionKind.ALLOW
+    d = gate.authorize("workspace/notes.txt", Access.READ_WRITE)
+    assert d.kind == DecisionKind.ALLOW
+
+
+def test_session_grant_applied_via_current_session(temp_app_paths, tmp_path):
+    # A session-scoped grant must be honoured when the gate is bound to that session
+    # but the caller (a file tool) does not pass session_id explicitly.
+    parent = tmp_path / "proj"
+    parent.mkdir()
+    grants = [{"id": "g1", "path": str(parent), "access": "read_write",
+               "scope": "session", "session_id": "S1"}]
+
+    class _SessionStore:
+        def active_grants(self, session_id=None):  # noqa: ANN001
+            return [g for g in grants if g["session_id"] == session_id]
+
+    gate = PathGate(temp_app_paths, _SessionStore())
+    target = parent / "a.txt"
+    # Without binding, the session grant is invisible → prompt.
+    assert gate.authorize(target, Access.READ).kind == DecisionKind.NEEDS_CONSENT
+    # Bound to the session → the grant applies.
+    gate.current_session_id = "S1"
+    assert gate.authorize(target, Access.READ_WRITE).kind == DecisionKind.ALLOW
+
+
 @pytest.mark.skipif(
     not hasattr(Path, "symlink_to"), reason="symlink support required"
 )

@@ -38,6 +38,7 @@ class SessionStart(BaseModel):
     model: str | None = None
     persona_id: str | None = None
     run_config: RunConfigIn | None = None
+    initial_message: str | None = None
 
 
 @router.post("/api/sessions")
@@ -46,6 +47,7 @@ async def start_session(payload: SessionStart, request: Request) -> dict:
     rc = RunConfig.from_dict(payload.run_config.model_dump()) if payload.run_config else None
     session_id, position = _ctrl(request).start_manual_session(
         model=payload.model, persona_id=payload.persona_id, run_config=rc,
+        initial_message=payload.initial_message,
     )
     return {"session_id": session_id, "queue_position": position}
 

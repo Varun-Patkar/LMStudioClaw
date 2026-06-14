@@ -140,6 +140,9 @@ class Engine:
                 await on_event({"type": "warning", "message": warning})
 
         if initial_message:
+            # Echo the seeded prompt to the UI so it shows as a user bubble live (the
+            # turn is also persisted when consumed, so it survives a reload).
+            await on_event({"type": "user_message", "text": initial_message})
             control.message(initial_message)
 
         try:
@@ -163,8 +166,9 @@ class Engine:
 
                 control.stop_turn.clear()
                 await on_event({"type": "turn", "state": "start"})
-                await self._run_turn(session_id, messages, model_id, budget, control, on_event,
-                                     unattended, run_config)
+                messages, budget = await self._run_turn(
+                    session_id, messages, model_id, budget, control, on_event,
+                    unattended, run_config)
                 await on_event({"type": "turn", "state": "end"})
 
                 if control.stop_session.is_set():
@@ -222,6 +226,12 @@ class Engine:
             tokens = budget_mod.estimate_tokens(str(content)) + 4
             key = role if role in breakdown else ("system" if role == "steer" else "user")
             breakdown[key] = breakdown.get(key, 0) + tokens
+            # Attribute an assistant message's tool-call request (name + arguments) to
+            # the "tool" bucket so the gauge hover reflects tool token consumption.
+            for call in msg.get("tool_calls") or []:
+                fn = call.get("function", {}) if isinstance(call, dict) else {}
+                breakdown["tool"] += budget_mod.estimate_tokens(
+                    str(fn.get("name", "")) + str(fn.get("arguments", "")))
         return {
             "type": "budget", "used": budget.used, "total": budget.total,
             "threshold": budget.threshold, "limit": budget.limit,
@@ -255,7 +265,13 @@ class Engine:
 
     async def _run_turn(self, session_id, messages, model_id, budget, control, on_event,
                         unattended, run_config=None):
-        """Run one assistant turn, resolving tool calls until a final answer."""
+        """Run one assistant turn, resolving tool calls until a final answer.
+
+        Tool results can be large (web pages, file dumps), so the budget is re-checked
+        and compacted **between tool iterations** — not only between user turns — so a
+        single turn's accumulated tool output cannot silently overflow the context
+        window (FR-061/FR-067).
+        """
         if run_config is not None:
             specs, _warnings = self._registry.effective_tools(run_config)
         else:
@@ -263,7 +279,11 @@ class Engine:
         tools = [t.to_openai() for t in specs]
         for _ in range(_MAX_TOOL_ITERS):
             if control.stop_turn.is_set():
-                return
+                return messages, budget
+            # Compact before generating if prior tool results pushed us over threshold.
+            messages, budget = await self._maybe_compact(
+                session_id, messages, model_id, budget, on_event
+            )
             assistant_text, tool_calls = await self._stream_completion(
                 messages, model_id, tools, control, on_event
             )
@@ -280,7 +300,7 @@ class Engine:
                     messages.append({"role": "assistant", "content": assistant_text})
                     self._store.add_turn(session_id, role="assistant", content=assistant_text,
                                          token_estimate=budget_mod.estimate_tokens(assistant_text))
-                return
+                return messages, budget
 
             # Record the assistant's tool-call turn, then execute each call.
             messages.append({"role": "assistant", "content": assistant_text or None,
@@ -288,6 +308,7 @@ class Engine:
             for call in tool_calls:
                 await self._execute_tool_call(session_id, call, messages, control, on_event,
                                               unattended)
+        return messages, budget
 
     async def _stream_completion(self, messages, model_id, tools, control, on_event):
         """Stream a single completion, emitting tokens; collect any tool calls."""

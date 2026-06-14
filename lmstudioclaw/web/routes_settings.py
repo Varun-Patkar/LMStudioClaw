@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from ..model.catalog import list_models
-from ..model.context_prefs import set_context_pref
+from ..model.context_prefs import load_prefs, preferred_context, set_context_pref
 
 router = APIRouter(tags=["settings"])
 
@@ -38,6 +38,56 @@ async def patch_settings(payload: dict, request: Request) -> dict:
     return ctrl.settings.to_dict()
 
 
+# -- Phone tunnel ("See this on your phone") --------------------------------
+
+def _tunnel_payload(ctrl) -> dict:
+    """Build the tunnel status response, attaching a QR SVG while running."""
+    status = ctrl.tunnel.status()
+    if status.get("running") and status.get("url"):
+        from .tunnel import TunnelError, qr_svg
+        try:
+            status["qr_svg"] = qr_svg(status["url"])
+        except TunnelError as exc:
+            status["qr_error"] = str(exc)
+    return status
+
+
+@router.get("/api/tunnel")
+async def tunnel_status(request: Request) -> dict:
+    """Return the current phone-tunnel status (+ QR code when running)."""
+    return _tunnel_payload(_ctrl(request))
+
+
+@router.post("/api/tunnel/start")
+async def tunnel_start(request: Request) -> dict:
+    """Start a public Cloudflare quick tunnel to the local UI and return its QR.
+
+    Lets the user open the controller on their phone by scanning the QR code (e.g.
+    with Google Lens / the camera). Best-effort: a missing ``cloudflared`` binary
+    yields a clear 501 with install guidance rather than a crash.
+    """
+    import asyncio
+
+    from .tunnel import TunnelError
+
+    ctrl = _ctrl(request)
+    port = getattr(ctrl, "served_port", None) or ctrl.settings.web_port
+    try:
+        # Starting the tunnel blocks while cloudflared negotiates; run it off the loop.
+        await asyncio.to_thread(ctrl.tunnel.start, port)
+    except TunnelError as exc:
+        raise HTTPException(501, str(exc)) from exc
+    return _tunnel_payload(ctrl)
+
+
+@router.post("/api/tunnel/stop")
+async def tunnel_stop(request: Request) -> dict:
+    """Stop the public phone tunnel."""
+    ctrl = _ctrl(request)
+    ctrl.tunnel.stop()
+    return {"running": False, "url": None}
+
+
 # -- Models (Advanced → Model Management) -----------------------------------
 
 @router.get("/api/models")
@@ -45,12 +95,18 @@ async def get_models(request: Request) -> dict:
     """Discover LM Studio models in one call (no polling, FR-045)."""
     ctrl = _ctrl(request)
     models, connected = list_models(ctrl.http)
+    prefs = load_prefs()
     return {
         "connected": connected,
         "models": [
             {
                 "key": m.key, "display_name": m.display_name,
                 "max_context_length": m.max_context_length,
+                # Effective pinned context (saved preference clamped to model max),
+                # so the UI can show the value the user actually saved.
+                "preferred_context_length": preferred_context(
+                    {"key": m.key, "max_context_length": m.max_context_length}, prefs
+                ),
                 "quantization": m.quantization, "size_bytes": m.size_bytes,
                 "capabilities": m.capabilities, "is_loaded": m.is_loaded,
             }
@@ -191,11 +247,18 @@ async def open_in_vscode(payload: OpenIn) -> dict:
     """
     import os
 
-    code = shutil.which("code") or shutil.which("code.cmd")
+    if os.name == "nt":
+        # On Windows ``shutil.which("code")`` can return the extensionless bash wrapper
+        # (which raises WinError 193 when spawned); prefer the .cmd/.exe launchers.
+        code = (shutil.which("code.cmd") or shutil.which("code.exe")
+                or shutil.which("code"))
+    else:
+        code = shutil.which("code")
     if code is None:
         raise HTTPException(501, "VS Code ('code' command) is not available on PATH.")
-    # A .cmd/.bat shim must be launched via the command interpreter on Windows.
-    if os.name == "nt" and code.lower().endswith((".cmd", ".bat")):
+    # Any non-.exe launcher (a .cmd/.bat shim or extensionless wrapper) must go through
+    # the command interpreter on Windows.
+    if os.name == "nt" and not code.lower().endswith(".exe"):
         cmd = ["cmd", "/c", code, payload.path]
     else:
         cmd = [code, payload.path]

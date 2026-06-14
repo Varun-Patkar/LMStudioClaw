@@ -127,6 +127,27 @@ def test_secret_isolated_from_agent(temp_app_paths):
     assert decision.kind == DecisionKind.DENY
 
 
+def test_secret_rename_and_value_update(temp_app_paths):
+    """Renaming preserves the value (and owner); a new value replaces it; conflicts fail."""
+    vault = SecretsVault(temp_app_paths.secrets_dir)
+    vault.set("old", "v1", owner="user")
+
+    # Rename only — value + owner preserved under the new ref.
+    assert vault.rename("old", "new") is True
+    assert not vault.has("old") and vault.has("new")
+    assert vault.inject({"K": "new"}) == {"K": "v1"}
+    assert vault.list_refs() == [{"ref_name": "new", "owner": "user"}]
+
+    # Rename + replace value.
+    assert vault.rename("new", "newer", "v2") is True
+    assert vault.inject({"K": "newer"}) == {"K": "v2"}
+
+    # Renaming a missing ref returns False; colliding with an existing ref returns False.
+    assert vault.rename("ghost", "x") is False
+    vault.set("other", "z", owner="user")
+    assert vault.rename("newer", "other") is False
+
+
 def _registry_with_vault(paths):
     """Registry wired to a real vault so secret references can resolve."""
     store = Store(paths.db_path)
@@ -188,6 +209,28 @@ def test_flatten_taskgroup_error_surfaces_cause():
     msg = _flatten_error(grp)
     assert "ConnectionRefusedError" in msg and "nope" in msg
     assert "TaskGroup" not in msg
+
+
+def test_resolve_stdio_command_wraps_cmd_shim(monkeypatch):
+    """On Windows an ``npx`` (npx.cmd) command is launched via ``cmd /c`` (WinError 193 fix)."""
+    import lmstudioclaw.capabilities.mcp_client as mc
+
+    monkeypatch.setattr(mc.os, "name", "nt", raising=False)
+    monkeypatch.setattr(mc.shutil, "which", lambda c: r"C:\Program Files\nodejs\npx.cmd")
+    cmd, args = mc._resolve_stdio_command("npx", ["@playwright/mcp@latest", "--extension"])
+    assert cmd == "cmd"
+    assert args[:2] == ["/c", r"C:\Program Files\nodejs\npx.cmd"]
+    assert args[2:] == ["@playwright/mcp@latest", "--extension"]
+
+
+def test_resolve_stdio_command_passthrough_exe(monkeypatch):
+    """A real ``.exe`` (or non-Windows) command is passed through unchanged."""
+    import lmstudioclaw.capabilities.mcp_client as mc
+
+    monkeypatch.setattr(mc.os, "name", "nt", raising=False)
+    monkeypatch.setattr(mc.shutil, "which", lambda c: r"C:\tools\server.exe")
+    cmd, args = mc._resolve_stdio_command("server", ["--flag"])
+    assert cmd == r"C:\tools\server.exe" and args == ["--flag"]
 
 
 def test_capability_metadata_persists_mcp_tools(temp_app_paths):

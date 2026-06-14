@@ -229,6 +229,62 @@ async def set_secret(ref_name: str, payload: SecretIn, request: Request) -> dict
     return {"ok": True}
 
 
+class SecretUpdate(BaseModel):
+    """Rename a secret and/or replace its value (both user-initiated; FR-078).
+
+    ``new_ref`` renames the reference; ``value`` (when provided) replaces the stored
+    value. Omitting ``value`` keeps the existing one. Values are never returned.
+    """
+
+    new_ref: str | None = None
+    value: str | None = None
+
+
+@router.patch("/api/secrets/{ref_name}")
+async def update_secret(ref_name: str, payload: SecretUpdate, request: Request) -> dict:
+    """Rename a secret and/or update its value (write-only)."""
+    vault = _ctrl(request).vault
+    new_ref = (payload.new_ref or ref_name).strip()
+    if not new_ref:
+        raise HTTPException(422, "A reference name is required.")
+    if not vault.has(ref_name):
+        raise HTTPException(404, f"No secret named '{ref_name}'.")
+    if new_ref == ref_name:
+        # Value-only update: a value is required since the name is unchanged.
+        if not payload.value:
+            raise HTTPException(422, "A new value is required to update the secret.")
+        vault.set(ref_name, payload.value, owner=_owner_of(vault, ref_name))
+        return {"ok": True, "ref_name": ref_name}
+    if not vault.rename(ref_name, new_ref, payload.value):
+        raise HTTPException(409, f"A secret named '{new_ref}' already exists.")
+    # Keep mcp.json references in sync so a rename doesn't strand a now-missing
+    # ${secret:OLD} reference (which would re-prompt for the old name).
+    _rewrite_secret_refs(_ctrl(request).paths.mcp_json, ref_name, new_ref)
+    return {"ok": True, "ref_name": new_ref}
+
+
+def _rewrite_secret_refs(mcp_json, old_ref: str, new_ref: str) -> None:
+    """Rewrite ``${secret:OLD}`` → ``${secret:NEW}`` in ``mcp.json`` (best-effort)."""
+    try:
+        text = mcp_json.read_text(encoding="utf-8")
+    except OSError:
+        return
+    updated = text.replace("${secret:" + old_ref + "}", "${secret:" + new_ref + "}")
+    if updated != text:
+        try:
+            mcp_json.write_text(updated, encoding="utf-8")
+        except OSError:
+            pass
+
+
+def _owner_of(vault, ref_name: str) -> str:
+    """Return the stored owner for a secret (defaults to 'user')."""
+    for r in vault.list_refs():
+        if r["ref_name"] == ref_name:
+            return r.get("owner", "user")
+    return "user"
+
+
 @router.delete("/api/secrets/{ref_name}")
 async def delete_secret(ref_name: str, request: Request) -> dict:
     """Delete a secret by reference name."""
