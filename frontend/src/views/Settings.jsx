@@ -19,7 +19,7 @@ export default function Settings() {
   if (!data) return <Skeleton />;
 
   const { settings, modelsResp, personas, grants } = data;
-  const save = async (patchObj) => { try { await patch("/api/settings", patchObj); } catch (e) { toast(e.message); } };
+  const save = async (patchObj) => { try { return await patch("/api/settings", patchObj); } catch (e) { toast(e.message); return null; } };
 
   const Field = ({ label, children }) => (
     <div className="set-field"><label>{label}</label>{children}</div>
@@ -27,6 +27,8 @@ export default function Settings() {
 
   return (
     <>
+      <div className="view-head"><h1>Settings</h1><span className="sub">Theme, runtime, permissions, personas &amp; models</span></div>
+
       {/* General */}
       <div className="card">
         <div className="card-head"><h2>General</h2></div>
@@ -44,7 +46,7 @@ export default function Settings() {
           </select>
         </Field>
         <Field label="Launch on login (start minimized)">
-          <input type="checkbox" className="switch" defaultChecked={settings.startup_launch} onChange={(e) => save({ startup_launch: e.target.checked })} />
+          <StartupToggle initial={settings.startup_launch} save={save} />
         </Field>
       </div>
 
@@ -87,6 +89,28 @@ export default function Settings() {
       <ModelManagement modelsResp={modelsResp} reload={load} />
     </>
   );
+}
+
+/**
+ * Launch-on-login toggle. Flips optimistically for instant feedback, then reconciles
+ * to the real OS state the backend reports (it actually creates/removes a Startup
+ * shortcut), so the switch can never silently disagree with Windows.
+ */
+function StartupToggle({ initial, save }) {
+  const toast = useToast();
+  const [on, setOn] = useState(!!initial);
+  const [busy, setBusy] = useState(false);
+  const onChange = async (e) => {
+    const want = e.target.checked;
+    setOn(want); setBusy(true);
+    const res = await save({ startup_launch: want });
+    setBusy(false);
+    if (res && typeof res.startup_launch === "boolean") {
+      setOn(res.startup_launch);
+      if (res.startup_launch !== want) toast("Could not update Windows startup. Check permissions.");
+    }
+  };
+  return <input type="checkbox" className="switch" checked={on} disabled={busy} onChange={onChange} />;
 }
 
 /**

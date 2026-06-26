@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.0",
+  "presets": {
+    "companion-standard": {
+      "version": "1.0.0",
+      "source": "local",
+      "manifest_hash": "sha256:88a46ab65eedc8ecda8265c700a03b1fd6ac8717b44345edd169db855273c91a",
+      "enabled": true,
+      "priority": 10,
+      "registered_commands": {
+        "copilot": [
+          "speckit.specify",
+          "speckit.clarify",
+          "speckit.plan",
+          "speckit.tasks",
+          "speckit.analyze",
+          "speckit.implement",
+          "speckit.constitution"
+        ]
+      },
+      "registered_skills": [],
+      "installed_at": "2026-06-26T14:49:35.292160+00:00"
+    }
+  }
+}

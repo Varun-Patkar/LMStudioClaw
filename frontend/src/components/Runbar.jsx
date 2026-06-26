@@ -1,15 +1,14 @@
-import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { AnimatePresence, motion } from "framer-motion";
 import { del } from "../api.js";
 import { useToast } from "./Toast.jsx";
 
 /**
- * Top-right run indicator + collapsible queue panel. Driven by the live status
- * socket state passed from App: { model, active, queue }.
+ * Sidebar-footer run status: the current active run (or model/idle state) plus a
+ * scrollable list of queued runs beneath it. Each queued row opens that run's
+ * session (an automation is just a scheduled session, so it opens the same way).
+ * Driven by the live status socket state from App: { model, active, queue }.
  */
 export default function Runbar({ status }) {
-  const [open, setOpen] = useState(false);
   const navigate = useNavigate();
   const toast = useToast();
   const { active, queue, model } = status;
@@ -23,42 +22,38 @@ export default function Runbar({ status }) {
   else if (modelStatus === "ready") { cls += " active"; label = model.model ? `Model ready · ${model.model}` : "Model ready"; }
   else if (modelStatus === "error") { cls += " error"; label = "Load failed"; }
 
+  const cancel = async (id) => {
+    try { await del(`/api/queue/${id}`); toast("Queued run cancelled"); }
+    catch (e) { toast(e.message); }
+  };
+  const openRun = (id) => navigate(`/sessions/${id}`);
+
   return (
     <div className="runbar">
-      <div className={cls} onClick={() => { if (active) navigate(`/sessions/${active.id}`); }}
+      <div className={cls}
+           onClick={() => { if (active) openRun(active.id); }}
            title={active ? "Open the running session" : "App status"}>
         <span className="dot" />
-        <span>{label}</span>
-        {queue.length > 0 && (
-          <span className="q-count" title="Toggle queue"
-                onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}>
-            {queue.length}
-          </span>
-        )}
+        <span className="run-label">{label}</span>
+        {queue.length > 0 && <span className="q-count" title={`${queue.length} queued`}>{queue.length}</span>}
       </div>
 
-      <AnimatePresence>
-        {open && queue.length > 0 && (
-          <motion.div className="queue-panel"
-            initial={{ opacity: 0, y: -6, scale: 0.98 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: -6, scale: 0.98 }}
-            transition={{ duration: 0.16 }}>
-            <h3>Queued ({queue.length})</h3>
-            {queue.map((it) => (
-              <div className="queue-item" key={it.id}>
-                <span className="q-type">{it.trigger_type === "automation" ? "Auto" : "Session"}</span>
-                <span className="q-label">{it.label || it.id.slice(0, 8)}</span>
-                <button className="btn ghost" title="Cancel queued run"
-                  onClick={async () => {
-                    try { await del(`/api/queue/${it.id}`); toast("Queued run cancelled"); }
-                    catch (e) { toast(e.message); }
-                  }}>✕</button>
-              </div>
-            ))}
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {queue.length > 0 && (
+        <div className="queue-list">
+          {queue.map((it) => (
+            <div className="queue-row" key={it.id} role="button" tabIndex={0}
+                 title="Open this queued run"
+                 onClick={() => openRun(it.id)}
+                 onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openRun(it.id); } }}>
+              <span className="q-dot" />
+              <span className="q-type">{it.trigger_type === "automation" ? "Auto" : "Session"}</span>
+              <span className="q-label">{it.label || it.id.slice(0, 8)}</span>
+              <button className="q-cancel" title="Cancel queued run"
+                      onClick={(e) => { e.stopPropagation(); cancel(it.id); }}>✕</button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

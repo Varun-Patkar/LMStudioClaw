@@ -8,6 +8,7 @@ import subprocess
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from ..config import autostart
 from ..model.catalog import list_models
 from ..model.context_prefs import load_prefs, preferred_context, set_context_pref
 
@@ -23,17 +24,33 @@ def _ctrl(request: Request):
 
 @router.get("/api/settings")
 async def get_settings(request: Request) -> dict:
-    """Return current settings (no secret values)."""
-    return _ctrl(request).settings.to_dict()
+    """Return current settings, reconciling startup_launch to its real OS state.
+
+    Reflecting the actual Startup-folder shortcut here keeps the in-app toggle in
+    sync with what Windows (and Task Manager's Startup tab) actually does, so the two
+    can never silently disagree.
+    """
+    ctrl = _ctrl(request)
+    real = autostart.is_enabled()
+    if ctrl.settings.startup_launch != real:
+        ctrl.settings.startup_launch = real
+        ctrl.save()
+    return ctrl.settings.to_dict()
 
 
 @router.patch("/api/settings")
 async def patch_settings(payload: dict, request: Request) -> dict:
-    """Update settings fields and persist them."""
+    """Update settings fields and persist them.
+
+    When ``startup_launch`` is toggled, the change is applied to Windows (the Startup
+    shortcut is created/removed) and the stored value is reconciled to the real result.
+    """
     ctrl = _ctrl(request)
     for key, value in payload.items():
         if hasattr(ctrl.settings, key):
             setattr(ctrl.settings, key, value)
+    if "startup_launch" in payload:
+        ctrl.settings.startup_launch = autostart.apply(bool(payload["startup_launch"]))
     ctrl.save()
     return ctrl.settings.to_dict()
 

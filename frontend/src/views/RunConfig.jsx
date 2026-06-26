@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ChevronDown } from "lucide-react";
 import { get } from "../api.js";
 
 /**
@@ -13,13 +14,14 @@ import { get } from "../api.js";
  * from `mcp_selection` (whole server off for the run); a checked server stays active,
  * and any unchecked tool under it becomes a `tool_overrides["{server}__{tool}"] = false`.
  */
-export default function RunConfig({ models, defaultModel, onChange }) {
+export default function RunConfig({ models, defaultModel, onChange, showModel = true }) {
   const [tools, setTools] = useState({ builtin: [], tools: [], mcp_servers: [], mcp: [] });
   const [model, setModel] = useState("");
   const [disabled, setDisabled] = useState({});   // custom tool name -> true(disabled)
   const [mcpOff, setMcpOff] = useState({});        // server name -> true(de-selected)
   const [toolOff, setToolOff] = useState({});      // mcp tool id  -> true(disabled)
   const [expanded, setExpanded] = useState({});    // server name -> true(expanded)
+  const [open, setOpen] = useState(false);         // whole panel open/closed
 
   useEffect(() => { get("/api/tools").then(setTools).catch(() => {}); }, []);
 
@@ -43,37 +45,43 @@ export default function RunConfig({ models, defaultModel, onChange }) {
     : (tools.mcp_servers || []).map((n) => ({ name: n, tools: [], description: "" }));
 
   return (
-    <details className="run-config">
-      <summary>Run configuration (model · tools · MCP)</summary>
+    <div className="run-config">
+      <button type="button" className="rc-summary" onClick={() => setOpen((o) => !o)}>
+        <span>Run configuration <span className="muted">· model · tools · MCP</span></span>
+        <ChevronDown size={16} className={"rc-chev" + (open ? " open" : "")} />
+      </button>
+      {open && (
+      <div className="rc-body">
 
-      <div className="field">
-        <label>Model</label>
-        <select value={model} onChange={(e) => setModel(e.target.value)}>
-          <option value="">{def ? `Default model (${def.display_name})` : "Default model"}</option>
-          {models.filter((m) => m.key !== defaultModel)
-            .map((m) => <option key={m.key} value={m.key}>{m.display_name || m.key}</option>)}
-        </select>
-      </div>
+      {showModel && (
+        <div className="field">
+          <label>Model</label>
+          <select value={model} onChange={(e) => setModel(e.target.value)}>
+            <option value="">{def ? `Default model (${def.display_name})` : "Default model"}</option>
+            {models.filter((m) => m.key !== defaultModel)
+              .map((m) => <option key={m.key} value={m.key}>{m.display_name || m.key}</option>)}
+          </select>
+        </div>
+      )}
 
       <div className="field">
         <label>Default tools (always on)</label>
-        <div className="tool-grid">
+        <div className="chip-row">
           {tools.builtin.map((t) => (
-            <label className="check" key={t.name} title={t.description || "Default tool — always available"}>
-              <input type="checkbox" checked disabled readOnly /> {t.name}
-            </label>
+            <span className="tool-chip" key={t.name} title={t.description || "Default tool — always available"}>{t.name}</span>
           ))}
         </div>
       </div>
 
       {tools.tools.length > 0 && (
         <div className="field">
-          <label>Custom tools (uncheck to disable for this run)</label>
+          <label>Custom tools (toggle off to disable for this run)</label>
           <div className="tool-grid">
             {tools.tools.map((t) => (
               <label className="check" key={t.name} title={t.description || t.name}>
-                <input type="checkbox" checked={!disabled[t.name]}
-                  onChange={(e) => setDisabled((d) => ({ ...d, [t.name]: !e.target.checked }))} /> {t.name}
+                <span>{t.name}</span>
+                <input type="checkbox" className="switch" checked={!disabled[t.name]}
+                  onChange={(e) => setDisabled((d) => ({ ...d, [t.name]: !e.target.checked }))} />
               </label>
             ))}
           </div>
@@ -97,7 +105,7 @@ export default function RunConfig({ models, defaultModel, onChange }) {
                         </button>
                       : <span className="mcp-twisty placeholder" />}
                     <label className="check" title={srv.description || srv.name}>
-                      <input type="checkbox" checked={serverOn}
+                      <input type="checkbox" className="switch" checked={serverOn}
                         onChange={(e) => setMcpOff((m) => ({ ...m, [srv.name]: !e.target.checked }))} />
                       <strong>{srv.name}</strong>
                       {srv.status === "connect_failed" && <span className="mcp-failed"> failed</span>}
@@ -108,7 +116,7 @@ export default function RunConfig({ models, defaultModel, onChange }) {
                     <div className="mcp-tools">
                       {srv.tools.map((t) => (
                         <label className="check" key={t.id} title={t.description || t.name}>
-                          <input type="checkbox" disabled={!serverOn}
+                          <input type="checkbox" className="switch" disabled={!serverOn}
                             checked={serverOn && !toolOff[t.id]}
                             onChange={(e) => setToolOff((o) => ({ ...o, [t.id]: !e.target.checked }))} />
                           {t.name}
@@ -123,6 +131,8 @@ export default function RunConfig({ models, defaultModel, onChange }) {
           </div>
         </div>
       )}
-    </details>
+      </div>
+      )}
+    </div>
   );
 }

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { CalendarClock } from "lucide-react";
 import { get, post, patch, del } from "../api.js";
 import { useToast } from "../components/Toast.jsx";
 import Skeleton from "../components/Skeleton.jsx";
@@ -41,11 +42,16 @@ export default function Automations() {
     const body = { ...form, name: form.name.trim(), task: form.task.trim(), persona_id: form.persona_id || null, run_config: runCfg };
     if (form.schedule_type === "daily") { delete body.interval_unit; delete body.interval_value; }
     else { delete body.daily_days; delete body.daily_time; }
-    try { await post("/api/automations", body); toast("Automation created."); load(); }
+    try { await post("/api/automations", body); toast("Scheduled task created."); load(); }
     catch (e) { toast(e.message); }
   };
 
-  const toggle = async (a) => { try { await patch(`/api/automations/${a.id}`, { enabled: !a.enabled }); load(); } catch (e) { toast(e.message); } };
+  const toggle = async (a) => {
+    // Flip immediately for snappy feedback, then reconcile from the server.
+    setData((d) => ({ ...d, automations: d.automations.map((x) => x.id === a.id ? { ...x, enabled: !x.enabled } : x) }));
+    try { await patch(`/api/automations/${a.id}`, { enabled: !a.enabled }); load(); }
+    catch (e) { toast(e.message); load(); }
+  };
   const runNow = async (a) => { try { await post(`/api/automations/${a.id}/run`, {}); toast("Queued."); } catch (e) { toast(e.message); } };
   const remove = async (a) => { try { await del(`/api/automations/${a.id}`); load(); } catch (e) { toast(e.message); } };
 
@@ -55,8 +61,10 @@ export default function Automations() {
 
   return (
     <>
+      <div className="view-head"><h1>Scheduled</h1><span className="sub">Run the agent automatically on a schedule</span></div>
+
       <div className="card">
-        <div className="card-head"><h2>New automation</h2></div>
+        <div className="card-head"><h2>New scheduled task</h2></div>
         <input placeholder="Name" value={form.name} onChange={(e) => set({ name: e.target.value })} />
         <textarea placeholder="Task / instruction for the agent" value={form.task} onChange={(e) => set({ task: e.target.value })} />
         <div className="row"><span className="muted">Schedule</span>
@@ -98,8 +106,14 @@ export default function Automations() {
       </div>
 
       <div className="card">
-        <div className="card-head"><h2>Automations</h2></div>
-        {automations.length === 0 ? <p className="muted">No automations yet.</p> : (
+        <div className="card-head"><h2>Scheduled tasks</h2></div>
+        {automations.length === 0 ? (
+          <div className="empty-state">
+            <span className="ico"><CalendarClock size={28} /></span>
+            <strong>No scheduled tasks yet</strong>
+            Create one above to run the agent automatically on a schedule.
+          </div>
+        ) : (
           <table>
             <thead><tr><th>Name</th><th>Schedule</th><th>Mode</th><th>Last</th><th>Next</th><th /></tr></thead>
             <tbody>

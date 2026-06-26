@@ -23,13 +23,52 @@ except Exception:  # pragma: no cover - import guard for headless environments
 
 
 def _build_icon_image():
-    """Create a small in-memory tray icon image (matches the original app's look)."""
-    img = Image.new("RGB", (64, 64), color=(30, 35, 42))
-    draw = ImageDraw.Draw(img)
-    draw.rounded_rectangle((8, 8, 56, 56), radius=12, fill=(34, 132, 230))
-    draw.rectangle((18, 20, 46, 44), fill=(235, 240, 246))
-    draw.rectangle((22, 24, 42, 40), fill=(34, 132, 230))
-    return img
+    """Render the LMStudioClaw brand mark (gradient square + white spark/ring).
+
+    Matches the web favicon and sidebar logo so the tray, browser tab, and in-app
+    brand are all the same. Drawn at 4x and downscaled for smooth edges.
+    """
+    import math
+
+    scale = 4
+    size = 64 * scale
+
+    # Diagonal blue → indigo gradient (the --accent / --accent-2 brand colours).
+    grad = Image.new("RGB", (size, size))
+    px = grad.load()
+    a, b = (59, 130, 246), (99, 102, 241)
+    span = (size - 1) * 2
+    for y in range(size):
+        for x in range(size):
+            t = (x + y) / span
+            px[x, y] = (
+                round(a[0] + (b[0] - a[0]) * t),
+                round(a[1] + (b[1] - a[1]) * t),
+                round(a[2] + (b[2] - a[2]) * t),
+            )
+
+    # Rounded-square alpha mask.
+    mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        (0, 0, size - 1, size - 1), radius=int(size * 0.22), fill=255
+    )
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    img.paste(grad, (0, 0), mask)
+
+    # White spark: 8 rays + a centre ring.
+    d = ImageDraw.Draw(img)
+    cx = cy = size / 2
+    inner, outer = size * 0.20, size * 0.36
+    w = max(2, int(size * 0.05))
+    for k in range(8):
+        ang = math.radians(k * 45)
+        x1, y1 = cx + inner * math.cos(ang), cy + inner * math.sin(ang)
+        x2, y2 = cx + outer * math.cos(ang), cy + outer * math.sin(ang)
+        d.line((x1, y1, x2, y2), fill=(255, 255, 255, 255), width=w)
+    r = size * 0.135
+    d.ellipse((cx - r, cy - r, cx + r, cy + r), outline=(255, 255, 255, 255), width=w)
+
+    return img.resize((64, 64), Image.LANCZOS)
 
 
 class Tray:

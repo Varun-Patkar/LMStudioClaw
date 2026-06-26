@@ -8,10 +8,26 @@ import { useToast } from "../components/Toast.jsx";
 import Skeleton from "../components/Skeleton.jsx";
 import TokenGauge from "../components/TokenGauge.jsx";
 import ToolCard from "../components/ToolCard.jsx";
+import ActivityIndicator from "../components/ActivityIndicator.jsx";
 import RunConfig from "./RunConfig.jsx";
+import { useAppStatus } from "../lib/status.js";
+import { ArrowUp, Square } from "lucide-react";
+import { autoGrow, SUGGESTIONS } from "../lib/ui.js";
 
 const uid = () => Math.random().toString(36).slice(2);
 const TERMINAL = ["completed", "failed", "stopped"];
+
+/** Map a tool name to a friendly present-tense phrase for the activity line. */
+function toolVerb(name) {
+  const map = {
+    read_file: "Reading a file", list_dir: "Listing a folder", write_file: "Writing a file",
+    edit: "Editing a file", grep: "Searching file contents", find: "Finding files",
+    powershell: "Running a command", parallel: "Running parallel tasks",
+  };
+  if (map[name]) return map[name];
+  if (name && name.includes("__")) return `Using ${name.split("__")[0]}`;
+  return "Using a tool";
+}
 
 /** Parse a JSON column that may be a string, object, or null. */
 function parseJson(v) {
@@ -118,6 +134,9 @@ export default function SessionDetail() {
   const [cfgModel, setCfgModel] = useState("");
   const [cfgRun, setCfgRun] = useState(null);
   const [applying, setApplying] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [activeTool, setActiveTool] = useState(null);
+  const appStatus = useAppStatus();
 
   const ws = useRef(null);
   const streamingId = useRef(null);
@@ -163,11 +182,11 @@ export default function SessionDetail() {
       switch (evt.type) {
         case "turn":
           if (evt.state === "start") { streamingId.current = null; setGen(true); }
-          else { streamingId.current = null; finalizeStreaming(); setGen(false); }
+          else { streamingId.current = null; finalizeStreaming(); setGen(false); setStopping(false); setActiveTool(null); }
           break;
         case "status":
           setStatus(evt.status);
-          if (TERMINAL.includes(evt.status)) { setEnded(true); setGen(false); finalizeStreaming(); toast(`Session ${evt.status}.`); }
+          if (TERMINAL.includes(evt.status)) { setEnded(true); setGen(false); setStopping(false); setActiveTool(null); finalizeStreaming(); toast(`Session ${evt.status}.`); }
           break;
         case "token":
           if (!evt.text) break;
@@ -184,6 +203,7 @@ export default function SessionDetail() {
           finalizeStreaming();
           const tid = uid();
           toolMsgId.current = tid;
+          setActiveTool(toolVerb(evt.name));
           setMessages((ms) => [...ms, { id: tid, role: "tool",
             tool: { name: evt.name, args: evt.args || {}, pending: true } }]);
           break;
@@ -191,6 +211,7 @@ export default function SessionDetail() {
         case "tool_result": {
           const tid = toolMsgId.current;
           toolMsgId.current = null;
+          setActiveTool(null);
           setMessages((ms) => ms.map((m) => (m.id === tid && m.tool)
             ? { ...m, tool: { ...m.tool, pending: false, ok: evt.ok,
                 summary: evt.summary || "", meta: evt.meta || null } }
@@ -228,6 +249,15 @@ export default function SessionDetail() {
     ws.current.send(JSON.stringify({ type: kind, text }));
     setMessages((ms) => [...ms, { id: uid(), role: "user", content: text }]);
     setDraft("");
+  }
+
+  /** Ask the engine to stop the current turn. We optimistically show a "Stopping…"
+      state immediately; it clears when the engine emits turn-end (FR-059). */
+  function stopTurn() {
+    if (!ws.current) return;
+    setStopping(true);
+    try { ws.current.send(JSON.stringify({ type: "stop", scope: "turn" })); }
+    catch (e) { setStopping(false); toast(e.message); }
   }
 
   function endSession() {
@@ -275,44 +305,42 @@ export default function SessionDetail() {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
   };
 
+  // Derive the plain-English "what's happening now" line from the session socket
+  // state plus the app-wide model/queue status (so model loading is visible here).
+  const isActiveRun = appStatus?.active && appStatus.active.id === id;
+  const modelStatus = appStatus?.model?.status || "idle";
+  const queueIdx = (appStatus?.queue || []).findIndex((q) => q.id === id);
+  function activityPhase() {
+    if (stopping) return { variant: "stopping", text: "Stopping the current turn…" };
+    if (status === "queued" || queueIdx >= 0) {
+      const pos = queueIdx >= 0 ? queueIdx + 1 : null;
+      return { variant: "loading", text: pos
+        ? `Queued — waiting for the current run (position ${pos})`
+        : "Queued — waiting for the current run to finish" };
+    }
+    if (isActiveRun && modelStatus === "loading")
+      return { variant: "loading", text: `Loading model${appStatus.model.model ? " " + appStatus.model.model : ""}…` };
+    if (isActiveRun && modelStatus === "error")
+      return { variant: "stopping", text: "Model failed to load — check LM Studio" };
+    if (generating) return { variant: "busy", text: activeTool ? activeTool + "…" : "Thinking…" };
+    return { variant: "idle", text: "Ready — type a message to continue" };
+  }
+  const phase = activityPhase();
+
+  // Hero (centered) mode for a brand-new, empty session; once a message exists the
+  // composer animates down to the bottom (Cowork-style). The run config + model is
+  // always visible in the right rail so it's clear which agent is running.
+  const heroMode = !ended && messages.length === 0 && !generating && status !== "queued";
+  const runModelName = (isActiveRun && appStatus.model?.model) || session.model_key || settings.default_model || "Default";
+
   return (
-    <>
-      <div className="card">
-        <div className="card-head">
-          <button className="btn ghost" onClick={() => navigate("/sessions")}>← Back</button>
+    <div className="session-layout">
+      <div className={"chat-col" + (heroMode ? " hero" : "")}>
+        <div className="chat-head">
+          <button className="btn ghost sm" onClick={() => navigate("/sessions")}>← Back</button>
           <h2>Session</h2>
           <span className={"badge " + status}>{status}</span>
-          <span className="spacer" />
-          {!ended && <TokenGauge budget={budget} />}
-          {!ended && <button className="btn" disabled={!generating}
-            onClick={() => ws.current.send(JSON.stringify({ type: "stop", scope: "turn" }))}>Stop turn</button>}
-          {!ended && !generating && (
-            <button className="btn ghost" onClick={() => setChangeOpen((o) => !o)}>
-              {changeOpen ? "Close config" : "Change model / config"}
-            </button>
-          )}
-          {!ended
-            ? <button className="btn red" disabled={ending} onClick={endSession}>{ending ? <><span className="spinner" /> Ending…</> : "End session"}</button>
-            : <>
-                <button className="btn green" onClick={restartContinue}>Restart &amp; continue</button>
-                <button className="btn red" onClick={remove}>Delete</button>
-              </>}
         </div>
-
-        {!ended && !generating && changeOpen && (
-          <div className="change-config">
-            <p className="muted">Pick a different model and/or run configuration. Applying ends this
-              run (unloading the current model) and continues the conversation in a new run with your
-              choices.</p>
-            <RunConfig models={models} defaultModel={settings.default_model}
-              onChange={(cfg) => { setCfgRun(cfg); setCfgModel(cfg?.model || ""); }} />
-            <div className="row">
-              <button className="btn green" disabled={applying} onClick={changeAndContinue}>
-                {applying ? <><span className="spinner" /> Applying…</> : "Apply & continue"}</button>
-              <button className="btn ghost" onClick={() => setChangeOpen(false)}>Cancel</button>
-            </div>
-          </div>
-        )}
 
         {consent && (
           <div className="consent">
@@ -326,35 +354,96 @@ export default function SessionDetail() {
           </div>
         )}
 
-        <div className="transcript">
-          <AnimatePresence initial={false}>
-            {messages.map((m) => <Bubble key={m.id} m={m} />)}
-          </AnimatePresence>
-          <div ref={scroller} />
-        </div>
-
-        {ended
-          ? <p className="muted">Session ended. Use “Restart &amp; continue” to resume this conversation.</p>
-          : (
-            <div className="composer">
-              <textarea value={draft} placeholder="Message…  (Enter = send / steer, Shift+Enter = newline)"
-                onChange={(e) => setDraft(e.target.value)} onKeyDown={onKey} />
-              <button className="btn green" onClick={send}>Send</button>
+        <div className="chat-mid">
+          {heroMode ? (
+            <motion.div className="chat-greet" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.28 }}>
+              <h1>What should the agent work on?</h1>
+              <p>Send a message to begin — the model loads on your first turn.</p>
+            </motion.div>
+          ) : (
+            <div className="chat-body transcript">
+              <AnimatePresence initial={false}>
+                {messages.map((m) => <Bubble key={m.id} m={m} />)}
+              </AnimatePresence>
+              <div ref={scroller} />
             </div>
           )}
+
+          {!ended && (
+            <motion.div layout className="composer-wrap" transition={{ duration: 0.34, ease: [0.4, 0, 0.2, 1] }}>
+              {(!heroMode || phase.variant !== "idle") && (
+                <ActivityIndicator variant={phase.variant} text={phase.text} />
+              )}
+              <div className="composer2">
+                <textarea value={draft} rows={1}
+                  placeholder="Message the agent…  (Enter to send, Shift+Enter for a new line)"
+                  onChange={(e) => { setDraft(e.target.value); autoGrow(e.target); }} onKeyDown={onKey} />
+                {generating
+                  ? <button className="btn red send-btn working" disabled={stopping} onClick={stopTurn} title="Stop">
+                      {stopping ? <span className="spinner" /> : <Square size={15} />}</button>
+                  : <button className="btn send-btn" onClick={send} title="Send" disabled={!draft.trim()}>
+                      <ArrowUp size={18} /></button>}
+              </div>
+            </motion.div>
+          )}
+
+          {heroMode && (
+            <div className="suggestions">
+              {SUGGESTIONS.map((s) => (
+                <button key={s} className="suggest-chip" onClick={() => setDraft(s)}>{s}</button>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
-      {automation && (
+      <aside className="rail">
         <div className="card">
-          <div className="card-head">
-            <h2>Automation</h2><span className="spacer" />
-            <button className="btn ghost" onClick={() => navigate("/automations")}>Edit in Automations</button>
+          <div className="card-head"><h3>Run configuration</h3><span className="spacer" />
+            <span className={"badge " + status}>{status}</span></div>
+          <div className="run-card">
+            <div className="run-line"><span className="k">Model</span><span className="v" title={runModelName}>{runModelName}</span></div>
+            <div className="run-line"><span className="k">Context</span>{ended ? <span className="v">—</span> : <TokenGauge budget={budget} />}</div>
+            {!ended && <ActivityIndicator variant={phase.variant} text={phase.text} />}
+            <div className="row wrap">
+              {!ended && !generating && (
+                <button className="btn ghost sm" onClick={() => setChangeOpen((o) => !o)}>{changeOpen ? "Close" : "Change model"}</button>
+              )}
+              {!ended
+                ? <button className="btn red sm" disabled={ending} onClick={endSession}>{ending ? <><span className="spinner" /> Ending…</> : "End session"}</button>
+                : <>
+                    <button className="btn green sm" onClick={restartContinue}>Restart &amp; continue</button>
+                    <button className="btn red sm" onClick={remove}>Delete</button>
+                  </>}
+            </div>
+            {!ended && !generating && changeOpen && (
+              <div className="change-config">
+                <p className="muted">Applying ends this run (unloads the current model) and continues the
+                  conversation in a new run with your choices.</p>
+                <RunConfig models={models} defaultModel={settings.default_model}
+                  onChange={(cfg) => { setCfgRun(cfg); setCfgModel(cfg?.model || ""); }} />
+                <div className="row">
+                  <button className="btn green sm" disabled={applying} onClick={changeAndContinue}>
+                    {applying ? <><span className="spinner" /> Applying…</> : "Apply & continue"}</button>
+                  <button className="btn ghost sm" onClick={() => setChangeOpen(false)}>Cancel</button>
+                </div>
+              </div>
+            )}
           </div>
-          <p><strong>{automation.name}</strong></p>
-          <p className="muted">{automation.task}</p>
-          <p className="muted">Mode: {automation.session_mode} · {automation.enabled ? "enabled" : "disabled"}</p>
         </div>
-      )}
-    </>
+
+        {automation && (
+          <div className="card">
+            <div className="card-head"><h3>Schedule</h3><span className="spacer" />
+              <button className="btn ghost sm" onClick={() => navigate("/automations")}>Edit</button>
+            </div>
+            <p><strong>{automation.name}</strong></p>
+            <p className="muted">{automation.task}</p>
+            <p className="muted">Mode: {automation.session_mode} · {automation.enabled ? "enabled" : "disabled"}</p>
+          </div>
+        )}
+      </aside>
+    </div>
   );
 }

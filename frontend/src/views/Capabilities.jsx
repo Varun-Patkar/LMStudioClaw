@@ -1,12 +1,21 @@
 import { useEffect, useState } from "react";
+import {
+  Blocks, Wrench, Server, Upload, FileText, KeyRound,
+} from "lucide-react";
 import { get, post, patch, del, api } from "../api.js";
 import { useToast } from "../components/Toast.jsx";
 import Skeleton from "../components/Skeleton.jsx";
 
+/**
+ * Skills & Tools — a two-tab "Customize" surface (Cowork-style):
+ *  - Skills: discovered SKILL.md skills + custom Python tools, plus an "add a skill"
+ *    panel (write a form, upload a file, or import from a URL; template download).
+ *  - MCP & Servers: MCP servers as toggle rows + an add panel (paste JSON with
+ *    automatic secret extraction, or fill fields) + the write-only secrets store.
+ */
 export default function Capabilities() {
   const [data, setData] = useState(null);
-  const [mcp, setMcp] = useState({ name: "", type: "stdio", command: "", args: "", url: "", headers: "" });
-  const [secret, setSecret] = useState({ ref: "", value: "" });
+  const [tab, setTab] = useState("skills");
   const toast = useToast();
 
   const load = () => Promise.all([
@@ -21,9 +30,21 @@ export default function Capabilities() {
   const byKind = { skill: [], tool: [], mcp: [] };
   for (const c of data.caps) (byKind[c.kind] || (byKind[c.kind] = [])).push(c);
 
+  // A connect_failed server must never look healthy just because it is enabled.
+  const failed = (c) => c.status === "connect_failed";
+  const badgeFor = (c) => failed(c) ? "failed" : (c.enabled ? "enabled" : c.status);
+  const badgeClass = (c) => failed(c) ? "failed" : (c.status === "valid" ? "active" : c.status);
+
   const rescan = async () => { try { await post("/api/capabilities/refresh", {}); load(); } catch (e) { toast(e.message); } };
-  const trust = async (c) => { if (!confirm("Custom tools run arbitrary code. Trust this tool?")) return; try { await patch(`/api/capabilities/${c.id}`, { trust_confirmed: true }); load(); } catch (e) { toast(e.message); } };
-  const toggle = async (c) => { try { await patch(`/api/capabilities/${c.id}`, { enabled: !c.enabled }); load(); } catch (e) { toast(e.message); } };
+  const trust = async (c) => {
+    if (!confirm("Custom tools run arbitrary code. Trust this tool?")) return;
+    try { await patch(`/api/capabilities/${c.id}`, { trust_confirmed: true }); load(); } catch (e) { toast(e.message); }
+  };
+  const toggle = async (c) => {
+    // Optimistically flip, then reconcile from the server.
+    setData((d) => ({ ...d, caps: d.caps.map((x) => x.id === c.id ? { ...x, enabled: !x.enabled } : x) }));
+    try { await patch(`/api/capabilities/${c.id}`, { enabled: !c.enabled }); load(); } catch (e) { toast(e.message); load(); }
+  };
   const editMcpJson = async () => {
     try {
       const { path } = await get("/api/capabilities/mcp-config-path");
@@ -31,85 +52,54 @@ export default function Capabilities() {
       toast("Opened mcp.json in VS Code. Save your changes, then Rescan.");
     } catch (e) { toast(e.message); }
   };
-
-  // A connect_failed server must never look healthy just because it is enabled.
-  const failed = (c) => c.status === "connect_failed";
-  const badgeFor = (c) => failed(c) ? "failed" : (c.enabled ? "enabled" : c.status);
-  const badgeClass = (c) => failed(c) ? "failed" : (c.status === "valid" ? "active" : c.status);
-
-  const Row = ({ c }) => (
-    <tr>
-      <td>{c.name}</td>
-      <td><span className={"badge " + badgeClass(c)}>{badgeFor(c)}</span></td>
-      <td className="muted">{c.description || ""}</td>
-      <td>
-        <div className="row">
-          {c.kind === "tool" && !c.trust_confirmed && <button className="btn amber" onClick={() => trust(c)}>Confirm trust</button>}
-          {c.kind === "mcp" && failed(c) && <button className="btn ghost" onClick={editMcpJson}>Fix in VS Code</button>}
-          {(c.status === "valid" || c.status === "disabled") && <button className="btn ghost" onClick={() => toggle(c)}>{c.enabled ? "Disable" : "Enable"}</button>}
-          {c.kind === "mcp" && <button className="btn red" onClick={() => delMcp(c.name)}>Delete</button>}
-        </div>
-      </td>
-    </tr>
-  );
-
-  const Table = ({ items, empty }) => items.length ? (
-    <table>
-      <thead><tr><th>Name</th><th>Status</th><th>Description</th><th /></tr></thead>
-      <tbody>{items.map((c) => <Row c={c} key={c.id} />)}</tbody>
-    </table>
-  ) : <p className="muted">{empty}</p>;
-
-  const addMcp = async () => {
-    const name = mcp.name.trim();
-    if (!name) return toast("Server name is required.");
-    const isHttp = mcp.type === "http" || mcp.type === "sse";
-    if (isHttp ? !mcp.url.trim() : !mcp.command.trim())
-      return toast(isHttp ? "Provide a URL for the HTTP server." : "Provide a command (stdio).");
-    // Parse "Key: Value" lines into a headers object (auth keys live here).
-    const headers = {};
-    for (const line of mcp.headers.split(/\n+/)) {
-      const idx = line.indexOf(":");
-      if (idx > 0) headers[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
-    }
-    const hasHeaders = Object.keys(headers).length > 0;
-    try {
-      await post("/api/capabilities/mcp", isHttp ? {
-        name, type: mcp.type, url: mcp.url.trim(),
-        headers: hasHeaders ? headers : null,
-      } : {
-        name, command: mcp.command.trim() || null,
-        args: mcp.args.trim() ? mcp.args.trim().split(/\s+/) : null,
-      });
-      setMcp({ name: "", type: "stdio", command: "", args: "", url: "", headers: "" }); load();
-    } catch (e) { toast(e.message); }
-  };
   const delMcp = async (name) => {
     if (!confirm(`Delete MCP server “${name}”?`)) return;
     try { await del(`/api/capabilities/mcp/${encodeURIComponent(name)}`); toast("MCP server deleted."); load(); }
     catch (e) { toast(e.message); }
   };
-  const saveSecret = async () => {
-    const ref = secret.ref.trim();
-    if (!ref) return toast("A reference name is required.");
-    if (!secret.value) return toast("A secret value is required.");
-    try { await api("PUT", `/api/secrets/${encodeURIComponent(ref)}`, { value: secret.value }); setSecret({ ref: "", value: "" }); load(); }
+  const addMcp = async (body, reset) => {
+    try { await post("/api/capabilities/mcp", body); toast("MCP server added."); reset && reset(); load(); }
     catch (e) { toast(e.message); }
   };
-  const delSecret = async (name) => { try { await del(`/api/secrets/${encodeURIComponent(name)}`); load(); } catch (e) { toast(e.message); } };
-  // Rename a secret and/or replace its value (blank value keeps the existing one).
-  const updateSecret = async (oldRef, newRef, value) => {
-    if (!newRef) { toast("A reference name is required."); return false; }
-    if (newRef === oldRef && !value) { toast("Enter a new value or a new name."); return false; }
+  const importMcp = async (jsonText) => {
     try {
-      await api("PATCH", `/api/secrets/${encodeURIComponent(oldRef)}`,
-        { new_ref: newRef, value: value || null });
-      toast("Secret updated.");
+      const r = await post("/api/capabilities/mcp/import", { config: jsonText });
+      const secrets = r.secrets?.length ? ` · ${r.secrets.length} secret(s) stored` : "";
+      toast(`Added ${(r.added || []).join(", ") || "server"}${secrets}.`);
       load();
       return true;
     } catch (e) { toast(e.message); return false; }
   };
-  // Save a value for a secret ref that mcp.json/tools reference but the vault lacks yet.
+  const createSkill = async (payload) => {
+    try { const r = await post("/api/capabilities/skill", payload); toast(`Skill “${r.name}” created.`); load(); return true; }
+    catch (e) { toast(e.message); return false; }
+  };
+  const skillFromUrl = async (url) => {
+    try { const r = await post("/api/capabilities/skill/from-url", { url }); toast(`Skill “${r.name}” added.`); load(); return true; }
+    catch (e) { toast(e.message); return false; }
+  };
+  const downloadTemplate = async () => {
+    try {
+      const t = await get("/api/capabilities/skill/template");
+      const blob = new Blob([t.content], { type: "text/markdown" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob); a.download = t.filename; a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (e) { toast(e.message); }
+  };
+  const saveSecret = async (ref, value) => {
+    try { await api("PUT", `/api/secrets/${encodeURIComponent(ref)}`, { value }); load(); return true; }
+    catch (e) { toast(e.message); return false; }
+  };
+  const delSecret = async (name) => { try { await del(`/api/secrets/${encodeURIComponent(name)}`); load(); } catch (e) { toast(e.message); } };
+  const updateSecret = async (oldRef, newRef, value) => {
+    if (!newRef) { toast("A reference name is required."); return false; }
+    if (newRef === oldRef && !value) { toast("Enter a new value or a new name."); return false; }
+    try {
+      await api("PATCH", `/api/secrets/${encodeURIComponent(oldRef)}`, { new_ref: newRef, value: value || null });
+      toast("Secret updated."); load(); return true;
+    } catch (e) { toast(e.message); return false; }
+  };
   const fillMissing = async (ref, value) => {
     if (!value) return toast("Enter a value for " + ref + ".");
     try {
@@ -122,40 +112,235 @@ export default function Capabilities() {
 
   return (
     <>
-      <div className="card">
-        <div className="card-head"><h2>Skills &amp; Tools</h2><span className="spacer" />
-          <button className="btn" onClick={rescan}>Rescan</button></div>
+      <div className="view-head">
+        <h1>Skills &amp; Tools</h1>
+        <span className="sub">Everything the agent can use</span>
+        <span className="spacer" />
+        <div className="segmented">
+          <button className={tab === "skills" ? "on" : ""} onClick={() => setTab("skills")}>Skills</button>
+          <button className={tab === "tools" ? "on" : ""} onClick={() => setTab("tools")}>Custom Tools</button>
+          <button className={tab === "mcp" ? "on" : ""} onClick={() => setTab("mcp")}>MCP &amp; Servers</button>
+        </div>
       </div>
 
-      {data.missing.length > 0 && (
-        <div className="card warn">
-          <div className="card-head"><h3>Secrets needed</h3></div>
-          <p className="muted">A configuration references these secrets, but their values
-            aren’t set yet. Enter each value (write-only — the agent never sees it), then the
-            related MCP server is re-checked automatically.</p>
-          {data.missing.map((ref) => <MissingSecret key={ref} refName={ref} onSave={fillMissing} />)}
+      {tab === "skills" && (
+        <>
+          <AddSkill onCreate={createSkill} onUrl={skillFromUrl} onTemplate={downloadTemplate} />
+
+          <div className="card">
+            <div className="card-head"><h3>Skills</h3><span className="spacer" />
+              <button className="btn ghost sm" onClick={rescan}>Rescan</button></div>
+            <CapList items={byKind.skill} icon={<Blocks size={18} />} empty="No skills yet — add one above."
+              badgeFor={badgeFor} badgeClass={badgeClass}
+              actions={(c) => (c.status === "valid" || c.status === "disabled") &&
+                <input type="checkbox" className="switch" checked={!!c.enabled} onChange={() => toggle(c)} title={c.enabled ? "Enabled" : "Disabled"} />} />
+          </div>
+        </>
+      )}
+
+      {tab === "tools" && (
+        <div className="card">
+          <div className="card-head"><h3>Custom tools</h3><span className="spacer" />
+            <button className="btn ghost sm" onClick={rescan}>Rescan</button></div>
+          <p className="muted">Custom Python tools discovered in your home <code>tools/</code> folder.
+            They run arbitrary code, so each must be trusted before it can be enabled.</p>
+          <CapList items={byKind.tool} icon={<Wrench size={18} />} empty="No custom tools found."
+            badgeFor={badgeFor} badgeClass={badgeClass}
+            actions={(c) => <>
+              {!c.trust_confirmed && <button className="btn amber sm" onClick={() => trust(c)}>Confirm trust</button>}
+              {(c.status === "valid" || c.status === "disabled") &&
+                <input type="checkbox" className="switch" checked={!!c.enabled} onChange={() => toggle(c)} title={c.enabled ? "Enabled" : "Disabled"} />}
+            </>} />
         </div>
       )}
 
-      <div className="card"><div className="card-head"><h3>Skills (SKILL.md)</h3></div><Table items={byKind.skill} empty="None found." /></div>
-      <div className="card"><div className="card-head"><h3>Custom tools</h3></div><Table items={byKind.tool} empty="None found." /></div>
+      {tab === "mcp" && (
+        <>
+          {data.missing.length > 0 && (
+            <div className="card warn">
+              <div className="card-head"><h3>Secrets needed</h3></div>
+              <p className="muted">A configuration references these secrets but their values aren’t
+                set yet. Enter each value (write-only — the agent never sees it); the related server
+                is re-checked automatically.</p>
+              {data.missing.map((ref) => <MissingSecret key={ref} refName={ref} onSave={fillMissing} />)}
+            </div>
+          )}
 
-      <div className="card">
-        <div className="card-head"><h3>MCP servers</h3><span className="spacer" />
-          <button className="btn ghost" onClick={editMcpJson}>Edit mcp.json in VS Code</button></div>
-        <Table items={byKind.mcp} empty="No MCP servers." />
-        <div className="row wrap">
-          <input placeholder="Server name" value={mcp.name} onChange={(e) => setMcp({ ...mcp, name: e.target.value })} />
-          <select value={mcp.type} onChange={(e) => setMcp({ ...mcp, type: e.target.value })}>
-            <option value="stdio">stdio (command)</option>
-            <option value="http">HTTP (streamable)</option>
-            <option value="sse">HTTP (SSE)</option>
-          </select>
+          <AddMcp onImport={importMcp} onAdd={addMcp} />
+
+          <div className="card">
+            <div className="card-head"><h3>MCP servers</h3><span className="spacer" />
+              <button className="btn ghost sm" onClick={rescan}>Rescan</button>
+              <button className="btn ghost sm" onClick={editMcpJson}>Edit mcp.json</button></div>
+            <CapList items={byKind.mcp} icon={<Server size={18} />} empty="No MCP servers yet — add one above."
+              badgeFor={badgeFor} badgeClass={badgeClass}
+              actions={(c) => <>
+                {failed(c) && <button className="btn ghost sm" onClick={editMcpJson}>Fix in VS Code</button>}
+                {(c.status === "valid" || c.status === "disabled") &&
+                  <input type="checkbox" className="switch" checked={!!c.enabled} onChange={() => toggle(c)} title={c.enabled ? "Enabled" : "Disabled"} />}
+                <button className="btn red sm" onClick={() => delMcp(c.name)}>Delete</button>
+              </>} />
+          </div>
+
+          <Secrets secrets={data.secrets} onSave={saveSecret} onUpdate={updateSecret} onDelete={delSecret} />
+        </>
+      )}
+    </>
+  );
+}
+
+/** A list of capability rows (icon · name · description · actions), or an empty note. */
+function CapList({ items, icon, empty, actions, badgeFor, badgeClass }) {
+  if (!items.length) return <div className="cap-empty">{empty}</div>;
+  return (
+    <div className="cap-list">
+      {items.map((c) => (
+        <div className="cap-row" key={c.id}>
+          <div className="cap-ico">{icon}</div>
+          <div className="cap-main">
+            <div className="cap-name">{c.name}<span className={"badge " + badgeClass(c)}>{badgeFor(c)}</span></div>
+            {c.description && <div className="cap-desc" title={c.description}>{c.description}</div>}
+          </div>
+          <div className="cap-actions">{actions(c)}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Add-a-skill panel: write a form, upload a SKILL.md, or import from a URL. */
+function AddSkill({ onCreate, onUrl, onTemplate }) {
+  const toast = useToast();
+  const [mode, setMode] = useState("form");
+  const [form, setForm] = useState({ name: "", description: "", content: "" });
+  const [url, setUrl] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const onFile = (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = async () => { await onCreate({ name: f.name.replace(/\.(md|markdown|txt)$/i, ""), content: String(r.result) }); };
+    r.readAsText(f); e.target.value = "";
+  };
+
+  return (
+    <div className="card">
+      <div className="card-head"><h3>Add a skill</h3><span className="spacer" />
+        <button className="btn ghost sm" onClick={onTemplate}><FileText size={14} /> Template</button></div>
+      <div className="segmented sm">
+        <button className={mode === "form" ? "on" : ""} onClick={() => setMode("form")}>Write</button>
+        <button className={mode === "upload" ? "on" : ""} onClick={() => setMode("upload")}>Upload</button>
+        <button className={mode === "url" ? "on" : ""} onClick={() => setMode("url")}>From URL</button>
+      </div>
+
+      {mode === "form" && (
+        <>
+          <input placeholder="Skill name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+          <input placeholder="When to call this skill (description the agent matches on)"
+            value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
+          <textarea placeholder="Skill contents — what the agent should do when this applies…" style={{ minHeight: 130 }}
+            value={form.content} onChange={(e) => setForm({ ...form, content: e.target.value })} />
+          <button className="btn green" disabled={busy} onClick={async () => {
+            if (!form.name.trim()) return toast("A skill name is required.");
+            setBusy(true);
+            const ok = await onCreate(form);
+            setBusy(false);
+            if (ok) setForm({ name: "", description: "", content: "" });
+          }}>{busy ? <><span className="spinner" /> Creating…</> : "Create skill"}</button>
+        </>
+      )}
+
+      {mode === "upload" && (
+        <>
+          <p className="muted">Upload a <code>SKILL.md</code> (or <code>.md</code>/<code>.txt</code>) file — it’s installed as a new skill.</p>
+          <label className="btn ghost" style={{ cursor: "pointer", alignSelf: "flex-start" }}>
+            <Upload size={15} /> Choose file…
+            <input type="file" accept=".md,.markdown,.txt" hidden onChange={onFile} />
+          </label>
+        </>
+      )}
+
+      {mode === "url" && (
+        <>
+          <input placeholder="https://…/SKILL.md" value={url} onChange={(e) => setUrl(e.target.value)} />
+          <p className="muted">Point to a hosted skill file. Common SKILL.md formats (YAML front-matter or a leading heading) are detected automatically.</p>
+          <button className="btn green" disabled={busy} onClick={async () => {
+            if (!url.trim()) return toast("Enter a URL.");
+            setBusy(true);
+            const ok = await onUrl(url.trim());
+            setBusy(false);
+            if (ok) setUrl("");
+          }}>{busy ? <><span className="spinner" /> Importing…</> : "Import from URL"}</button>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** Add-an-MCP-server panel: paste standard JSON (auto-secrets) or fill the fields. */
+function AddMcp({ onImport, onAdd }) {
+  const toast = useToast();
+  const [mode, setMode] = useState("json");
+  const [jsonText, setJson] = useState("");
+  const [mcp, setMcp] = useState({ name: "", type: "stdio", command: "", args: "", url: "", headers: "" });
+  const [busy, setBusy] = useState(false);
+
+  const submitFields = () => {
+    const name = mcp.name.trim();
+    if (!name) return toast("Server name is required.");
+    const isHttp = mcp.type === "http" || mcp.type === "sse";
+    if (isHttp ? !mcp.url.trim() : !mcp.command.trim())
+      return toast(isHttp ? "Provide a URL for the HTTP server." : "Provide a command (stdio).");
+    const headers = {};
+    for (const line of mcp.headers.split(/\n+/)) {
+      const idx = line.indexOf(":");
+      if (idx > 0) headers[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+    }
+    const body = isHttp
+      ? { name, type: mcp.type, url: mcp.url.trim(), headers: Object.keys(headers).length ? headers : null }
+      : { name, command: mcp.command.trim() || null, args: mcp.args.trim() ? mcp.args.trim().split(/\s+/) : null };
+    onAdd(body, () => setMcp({ name: "", type: "stdio", command: "", args: "", url: "", headers: "" }));
+  };
+
+  return (
+    <div className="card">
+      <div className="card-head"><h3>Add an MCP server</h3></div>
+      <div className="segmented sm">
+        <button className={mode === "json" ? "on" : ""} onClick={() => setMode("json")}>Paste JSON</button>
+        <button className={mode === "fields" ? "on" : ""} onClick={() => setMode("fields")}>Fill fields</button>
+      </div>
+
+      {mode === "json" ? (
+        <>
+          <textarea style={{ minHeight: 150, fontFamily: '"Cascadia Code", "Consolas", monospace', fontSize: 12.5 }}
+            placeholder={'{\n  "mcpServers": {\n    "my-server": {\n      "command": "npx",\n      "args": ["-y", "some-mcp"],\n      "env": { "API_KEY": "sk-..." }\n    }\n  }\n}'}
+            value={jsonText} onChange={(e) => setJson(e.target.value)} />
+          <p className="muted">Paste standard MCP JSON. Any token / key / authorization value in
+            <code> env</code> or <code>headers</code> is moved into a write-only secret automatically.</p>
+          <button className="btn green" disabled={busy} onClick={async () => {
+            if (!jsonText.trim()) return toast("Paste some JSON.");
+            setBusy(true);
+            const ok = await onImport(jsonText);
+            setBusy(false);
+            if (ok) setJson("");
+          }}>{busy ? <><span className="spinner" /> Importing…</> : "Import"}</button>
+        </>
+      ) : (
+        <>
+          <div className="row wrap">
+            <input placeholder="Server name" value={mcp.name} onChange={(e) => setMcp({ ...mcp, name: e.target.value })} />
+            <select value={mcp.type} onChange={(e) => setMcp({ ...mcp, type: e.target.value })}>
+              <option value="stdio">stdio (command)</option>
+              <option value="http">HTTP (streamable)</option>
+              <option value="sse">HTTP (SSE)</option>
+            </select>
+          </div>
           {mcp.type === "stdio" ? (
-            <>
+            <div className="row wrap">
               <input placeholder="Command e.g. npx" value={mcp.command} onChange={(e) => setMcp({ ...mcp, command: e.target.value })} />
               <input placeholder="Args (space-separated)" value={mcp.args} onChange={(e) => setMcp({ ...mcp, args: e.target.value })} />
-            </>
+            </div>
           ) : (
             <>
               <input placeholder="URL e.g. https://host/mcp" value={mcp.url} onChange={(e) => setMcp({ ...mcp, url: e.target.value })} />
@@ -163,35 +348,39 @@ export default function Capabilities() {
                 value={mcp.headers} onChange={(e) => setMcp({ ...mcp, headers: e.target.value })} />
             </>
           )}
-          <button className="btn green" onClick={addMcp}>Add MCP server</button>
-        </div>
-        <p className="muted">For an API key/token, save it under <strong>Secrets</strong> below, then
-          reference it in an env or header value as <code>${"{"}secret:REF_NAME{"}"}</code> — it is
-          resolved only when the server connects and is never shown. The same secret can be used by
-          custom tools (<code>SECRETS</code>) and skills (front-matter <code>secrets:</code>). If a
-          server shows <strong>failed</strong>, use <strong>Edit mcp.json in VS Code</strong> to fix
-          it, then Rescan.</p>
-      </div>
+          <button className="btn green" onClick={submitFields}>Add MCP server</button>
+        </>
+      )}
+    </div>
+  );
+}
 
-      <div className="card">
-        <div className="card-head"><h3>Secrets</h3></div>
-        <p className="muted">Values are write-only and never shown. The agent cannot read them.
-          You can rename a secret or replace its value with <strong>Edit</strong>.</p>
-        {data.secrets.length > 0 && (
-          <table>
-            <thead><tr><th>Reference</th><th>Owner</th><th /></tr></thead>
-            <tbody>{data.secrets.map((s) => (
-              <SecretRow key={s.ref_name} s={s} onUpdate={updateSecret} onDelete={delSecret} />
-            ))}</tbody>
-          </table>
-        )}
-        <div className="row wrap">
-          <input placeholder="Reference name" value={secret.ref} onChange={(e) => setSecret({ ...secret, ref: e.target.value })} />
-          <input type="password" placeholder="Secret value (write-only)" value={secret.value} onChange={(e) => setSecret({ ...secret, value: e.target.value })} />
-          <button className="btn green" onClick={saveSecret}>Save secret</button>
-        </div>
+/** Write-only secrets store (values never returned). */
+function Secrets({ secrets, onSave, onUpdate, onDelete }) {
+  const toast = useToast();
+  const [draft, setDraft] = useState({ ref: "", value: "" });
+  return (
+    <div className="card">
+      <div className="card-head"><h3>Secrets</h3></div>
+      <p className="muted">Values are write-only and never shown — the agent cannot read them.
+        Reference one anywhere as <code>${"{"}secret:REF{"}"}</code>.</p>
+      {secrets.length > 0 && (
+        <table>
+          <thead><tr><th>Reference</th><th>Owner</th><th /></tr></thead>
+          <tbody>{secrets.map((s) => <SecretRow key={s.ref_name} s={s} onUpdate={onUpdate} onDelete={onDelete} />)}</tbody>
+        </table>
+      )}
+      <div className="row wrap">
+        <input placeholder="Reference name" value={draft.ref} onChange={(e) => setDraft({ ...draft, ref: e.target.value })} />
+        <input type="password" placeholder="Secret value (write-only)" value={draft.value} onChange={(e) => setDraft({ ...draft, value: e.target.value })} />
+        <button className="btn green" onClick={async () => {
+          if (!draft.ref.trim()) return toast("A reference name is required.");
+          if (!draft.value) return toast("A secret value is required.");
+          const ok = await onSave(draft.ref.trim(), draft.value);
+          if (ok) setDraft({ ref: "", value: "" });
+        }}><KeyRound size={14} /> Save secret</button>
       </div>
-    </>
+    </div>
   );
 }
 
@@ -208,10 +397,7 @@ function MissingSecret({ refName, onSave }) {
   );
 }
 
-/**
- * A secret row that can be edited in place: rename the reference and/or replace the
- * (write-only) value. Leaving the value blank keeps the existing one.
- */
+/** A secret row editable in place: rename and/or replace its (write-only) value. */
 function SecretRow({ s, onUpdate, onDelete }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(s.ref_name);
@@ -224,8 +410,8 @@ function SecretRow({ s, onUpdate, onDelete }) {
         <td>{s.owner}</td>
         <td>
           <div className="row">
-            <button className="btn ghost" onClick={() => { setName(s.ref_name); setValue(""); setEditing(true); }}>Edit</button>
-            <button className="btn red" onClick={() => onDelete(s.ref_name)}>Delete</button>
+            <button className="btn ghost sm" onClick={() => { setName(s.ref_name); setValue(""); setEditing(true); }}>Edit</button>
+            <button className="btn red sm" onClick={() => onDelete(s.ref_name)}>Delete</button>
           </div>
         </td>
       </tr>
@@ -237,13 +423,12 @@ function SecretRow({ s, onUpdate, onDelete }) {
       <td>{s.owner}</td>
       <td>
         <div className="row wrap">
-          <input type="password" value={value} onChange={(e) => setValue(e.target.value)}
-            placeholder="New value (blank = keep)" />
-          <button className="btn green" onClick={async () => {
+          <input type="password" value={value} onChange={(e) => setValue(e.target.value)} placeholder="New value (blank = keep)" />
+          <button className="btn green sm" onClick={async () => {
             const ok = await onUpdate(s.ref_name, name.trim(), value);
             if (ok) setEditing(false);
           }}>Save</button>
-          <button className="btn ghost" onClick={() => setEditing(false)}>Cancel</button>
+          <button className="btn ghost sm" onClick={() => setEditing(false)}>Cancel</button>
         </div>
       </td>
     </tr>

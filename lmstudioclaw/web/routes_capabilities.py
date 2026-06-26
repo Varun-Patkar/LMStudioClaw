@@ -6,6 +6,9 @@ and ``/api/grants`` (US2). Secret values are never returned by any route (FR-026
 
 from __future__ import annotations
 
+import json
+import re
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
@@ -180,6 +183,209 @@ async def delete_mcp(name: str, request: Request) -> dict:
     if callable(discover):
         await _maybe_async(discover)
     return {"ok": True}
+
+
+# -- MCP import (paste JSON, auto-extract secrets) --------------------------
+
+class McpImportIn(BaseModel):
+    """Paste a block of standard MCP JSON to add one or more servers at once."""
+
+    config: str
+
+
+# Header/env keys whose values are treated as secrets and moved to the vault.
+_SECRET_KEY_RE = re.compile(r"(token|secret|password|authorization|api[_-]?key|access[_-]?key|bearer)", re.I)
+
+
+def _slug_ref(text: str) -> str:
+    """Turn 'server name / KEY' into an UPPER_SNAKE secret reference."""
+    ref = re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_").upper()
+    return ref or "SECRET"
+
+
+def _normalize_mcp(data: dict) -> dict:
+    """Coerce assorted pasted shapes into ``{server_name: config}``.
+
+    Accepts the standard ``{"mcpServers": {name: cfg}}`` wrapper, a bare
+    ``{name: cfg}`` map, or a single ``{"name": .., "command"/"url": ..}`` object.
+    """
+    if not isinstance(data, dict):
+        return {}
+    if isinstance(data.get("mcpServers"), dict):
+        return {k: v for k, v in data["mcpServers"].items() if isinstance(v, dict)}
+    if data.get("name") and (data.get("command") or data.get("url")):
+        name = str(data["name"])
+        return {name: {k: v for k, v in data.items() if k != "name"}}
+    # Otherwise assume the object itself maps names → configs.
+    out = {k: v for k, v in data.items() if isinstance(v, dict) and (v.get("command") or v.get("url"))}
+    return out
+
+
+@router.post("/api/capabilities/mcp/import")
+async def import_mcp(payload: McpImportIn, request: Request) -> dict:
+    """Add MCP server(s) from pasted JSON; auto-move secret-looking values to the vault.
+
+    Any ``env``/``headers`` value whose key looks like a credential (token, api key,
+    authorization, …) is stored as a write-only secret and replaced inline with a
+    ``${secret:REF}`` reference, so credentials never sit in ``mcp.json`` in the clear.
+    """
+    ctrl = _ctrl(request)
+    try:
+        data = json.loads(payload.config)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise HTTPException(422, f"Invalid JSON: {exc}")
+    servers = _normalize_mcp(data)
+    if not servers:
+        raise HTTPException(422, "No MCP servers found in that JSON.")
+    add = getattr(ctrl.registry, "add_mcp_server", None)
+    if not callable(add):
+        raise HTTPException(501, "MCP support not available")
+
+    added: list[str] = []
+    made_secrets: list[str] = []
+    for name, cfg in servers.items():
+        name = str(name).strip()
+        if not name or ctrl.store.get_capability_by_kind_name("mcp", name):
+            continue
+        entry: dict = {"name": name}
+        for key in ("command", "args", "env", "url", "type", "headers"):
+            if key in cfg and cfg[key] is not None:
+                entry[key] = cfg[key]
+        if isinstance(entry.get("args"), str):
+            entry["args"] = entry["args"].split()
+        # Pull credential-looking values out into the vault.
+        for field in ("env", "headers"):
+            values = entry.get(field)
+            if not isinstance(values, dict):
+                continue
+            for k, v in list(values.items()):
+                if isinstance(v, str) and not v.startswith("${secret:") and _SECRET_KEY_RE.search(k):
+                    ref = _slug_ref(f"{name}_{k}")
+                    ctrl.vault.set(ref, v, owner="mcp")
+                    values[k] = "${secret:" + ref + "}"
+                    made_secrets.append(ref)
+        if not (entry.get("command") or entry.get("url")):
+            continue
+        add(entry)
+        added.append(name)
+
+    if not added:
+        raise HTTPException(409, "Those MCP server(s) already exist or were invalid.")
+    await _maybe_async(getattr(ctrl.registry, "discover", lambda: None))
+    return {"ok": True, "added": added, "secrets": made_secrets}
+
+
+# -- Skills (create / template / import from URL) ---------------------------
+
+_SKILL_TEMPLATE = """---
+name: my-skill
+description: When to use this skill — describe the trigger conditions clearly so the agent knows when to apply it.
+---
+
+# My Skill
+
+Explain exactly what the agent should do when this skill applies. Include steps,
+examples, and any constraints. If you add helper scripts to this skill's folder, refer
+to them here by file name.
+"""
+
+
+def _name_from_content(content: str) -> str:
+    """Best-effort skill name: YAML front-matter ``name`` or the first ``#`` heading."""
+    m = re.search(r"^---\s*\n(.*?)\n---", content, re.S)
+    if m:
+        nm = re.search(r"^name:\s*(.+)$", m.group(1), re.M)
+        if nm:
+            return nm.group(1).strip().strip("'\"")
+    heading = re.search(r"^#\s+(.+)$", content, re.M)
+    return heading.group(1).strip() if heading else ""
+
+
+def _slug(name: str) -> str:
+    """Folder-safe slug for a skill name."""
+    s = re.sub(r"[^a-zA-Z0-9._-]+", "-", (name or "").strip().lower()).strip("-")
+    return s or "skill"
+
+
+def _write_skill(ctrl, folder_name: str, content: str) -> str:
+    """Write ``skills/<folder_name>/SKILL.md`` and return the folder name (raises on clash)."""
+    dest = ctrl.paths.skills / folder_name
+    if dest.exists():
+        raise HTTPException(409, f"A skill folder named '{folder_name}' already exists.")
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "SKILL.md").write_text(content, encoding="utf-8")
+    except OSError as exc:
+        raise HTTPException(500, f"Could not write the skill: {exc}")
+    return folder_name
+
+
+@router.get("/api/capabilities/skill/template")
+async def skill_template() -> dict:
+    """Return a starter SKILL.md the user can download and fill in."""
+    return {"filename": "SKILL.md", "content": _SKILL_TEMPLATE}
+
+
+class SkillIn(BaseModel):
+    """Create a skill from explicit fields or raw uploaded SKILL.md content."""
+
+    name: str | None = None
+    description: str | None = None
+    content: str
+
+
+@router.post("/api/capabilities/skill")
+async def create_skill(payload: SkillIn, request: Request) -> dict:
+    """Create a skill folder + SKILL.md from a form (name/when-to-call/contents) or upload.
+
+    If a name/description is given and the content has no YAML front-matter, a header is
+    synthesized so the skill is immediately valid and discoverable.
+    """
+    ctrl = _ctrl(request)
+    content = payload.content or ""
+    name = (payload.name or "").strip()
+    if not content.strip() and not name:
+        raise HTTPException(422, "Provide skill content (or at least a name).")
+    if not content.lstrip().startswith("---") and (name or (payload.description or "").strip()):
+        body = content.strip() or f"# {name or 'My Skill'}\n\nDescribe what to do here."
+        content = (
+            f"---\nname: {name or 'skill'}\n"
+            f"description: {(payload.description or '').strip()}\n---\n\n{body}\n"
+        )
+    folder = _slug(name or _name_from_content(content) or "skill")
+    _write_skill(ctrl, folder, content)
+    await _maybe_async(getattr(ctrl.registry, "discover", lambda: None))
+    return {"ok": True, "name": folder}
+
+
+class SkillUrlIn(BaseModel):
+    """Import a skill from a URL that hosts a SKILL.md (or skill text)."""
+
+    url: str
+
+
+@router.post("/api/capabilities/skill/from-url")
+async def skill_from_url(payload: SkillUrlIn, request: Request) -> dict:
+    """Fetch a skill file from a URL and install it (detects SKILL.md-style content)."""
+    ctrl = _ctrl(request)
+    url = (payload.url or "").strip()
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(422, "Provide a valid http(s) URL.")
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            text = resp.text
+    except Exception as exc:  # noqa: BLE001 - surface any fetch error to the user
+        raise HTTPException(400, f"Could not fetch the skill: {exc}")
+    if not text.strip():
+        raise HTTPException(422, "The URL returned an empty document.")
+    derived = _name_from_content(text) or url.rstrip("/").rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    folder = _slug(derived or "skill")
+    _write_skill(ctrl, folder, text)
+    await _maybe_async(getattr(ctrl.registry, "discover", lambda: None))
+    return {"ok": True, "name": folder}
 
 
 # -- Secrets (user-only; write-only values) ---------------------------------

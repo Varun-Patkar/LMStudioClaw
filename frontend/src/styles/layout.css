@@ -1,0 +1,128 @@
+/* App shell layout — left sidebar + scrollable main column + page container.
+   Replaces the original sticky top navbar with a collapsible left rail
+   (icons when collapsed). Responsive: the rail becomes a slide-in drawer on
+   narrow screens. */
+
+.app-shell { display: flex; min-height: 100vh; }
+
+/* ---- Left sidebar ---------------------------------------------------------- */
+.sidebar {
+  position: sticky; top: 0; align-self: flex-start;
+  height: 100vh; flex: none;
+  width: var(--sidebar-w);
+  display: flex; flex-direction: column; gap: var(--s2);
+  padding: var(--s4) var(--s3);
+  background: color-mix(in srgb, var(--bg-elev) 86%, transparent);
+  backdrop-filter: saturate(150%) blur(10px);
+  border-right: 1px solid var(--border);
+  transition: width var(--transition-slow);
+  z-index: 30;
+}
+.sidebar.collapsed { width: var(--sidebar-w-collapsed); }
+
+.sidebar-brand {
+  display: flex; align-items: center; gap: var(--s2);
+  padding: var(--s2) var(--s2) var(--s3);
+  min-height: 40px;
+}
+.sidebar-brand .logo {
+  width: 30px; height: 30px; flex: none; border-radius: 9px;
+  display: grid; place-items: center; color: #fff;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  box-shadow: var(--shadow-sm);
+}
+.sidebar-brand .brand-name {
+  font-size: 15px; font-weight: 700; letter-spacing: -.02em; white-space: nowrap;
+  background: linear-gradient(120deg, var(--accent), var(--accent-2));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.sidebar.collapsed .brand-name { display: none; }
+
+.sidebar-nav { display: flex; flex-direction: column; gap: 3px; }
+.sidebar-nav a {
+  display: flex; align-items: center; gap: var(--s3);
+  padding: 10px var(--s3); border-radius: var(--radius-sm);
+  color: var(--fg-dim); text-decoration: none; font-size: 13.5px; font-weight: 550;
+  white-space: nowrap; position: relative;
+  transition: background var(--transition), color var(--transition);
+}
+.sidebar-nav a .nav-ico { flex: none; display: grid; place-items: center; width: 20px; height: 20px; color: var(--fg-dim); transition: color var(--transition); }
+.sidebar-nav a:hover { background: var(--bg-input); color: var(--fg); }
+.sidebar-nav a:hover .nav-ico { color: var(--fg); }
+.sidebar-nav a.active { background: var(--accent-soft); color: var(--accent); font-weight: 640; }
+.sidebar-nav a.active .nav-ico { color: var(--accent); }
+.sidebar-nav a.active::before {
+  content: ""; position: absolute; left: 0; top: 50%; transform: translateY(-50%);
+  width: 3px; height: 20px; border-radius: 0 3px 3px 0; background: var(--accent);
+}
+.sidebar.collapsed .sidebar-nav a { justify-content: center; padding: 10px 0; }
+.sidebar.collapsed .nav-label { display: none; }
+
+/* Tooltip shown only when collapsed */
+.sidebar-nav a .nav-tip {
+  position: absolute; left: calc(100% + 10px); top: 50%; transform: translateY(-50%);
+  background: var(--bg-elev); color: var(--fg); border: 1px solid var(--border);
+  box-shadow: var(--shadow-pop); padding: 4px 9px; border-radius: 7px;
+  font-size: 12.5px; white-space: nowrap; pointer-events: none;
+  opacity: 0; visibility: hidden; transition: opacity var(--transition);
+  z-index: 40;
+}
+.sidebar.collapsed .sidebar-nav a:hover .nav-tip { opacity: 1; visibility: visible; }
+
+.sidebar-foot { margin-top: auto; display: flex; flex-direction: column; gap: var(--s2); }
+.sidebar-collapse {
+  display: flex; align-items: center; gap: var(--s2); justify-content: center;
+  background: var(--bg-input); border: 1px solid var(--border); color: var(--fg-dim);
+  border-radius: var(--radius-sm); padding: 7px; cursor: pointer;
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
+}
+.sidebar-collapse:hover { background: var(--bg-elev-2); color: var(--fg); border-color: var(--border-strong); }
+
+/* ---- Main column ----------------------------------------------------------- */
+.main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.view {
+  width: 90%; margin: 0 auto;
+  padding: var(--s6) 0 var(--s6); display: flex; flex-direction: column; gap: var(--s5);
+}
+.view-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--s3); margin-bottom: calc(var(--s2) * -1); }
+.view-head h1 { font-size: 24px; font-weight: 720; margin: 0; letter-spacing: -.02em; }
+.view-head .sub { color: var(--fg-dim); font-size: 13.5px; }
+
+/* Mobile drawer backdrop + hamburger */
+.mobile-bar { display: none; }
+.sidebar-scrim { display: none; }
+
+@media (max-width: 860px) {
+  .mobile-bar {
+    display: flex; align-items: center; gap: var(--s3);
+    position: sticky; top: 0; z-index: 25;
+    padding: var(--s3) var(--s4);
+    background: color-mix(in srgb, var(--bg-elev) 88%, transparent);
+    backdrop-filter: saturate(150%) blur(10px);
+    border-bottom: 1px solid var(--border);
+  }
+  .mobile-bar .menu-btn {
+    background: var(--bg-input); color: var(--fg); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 7px 9px; cursor: pointer; display: inline-flex;
+  }
+  .mobile-bar .brand-name { font-size: 15px; font-weight: 700;
+    background: linear-gradient(120deg, var(--accent), var(--accent-2));
+    -webkit-background-clip: text; background-clip: text; color: transparent; }
+
+  .sidebar {
+    position: fixed; left: 0; top: 0; height: 100vh; width: var(--sidebar-w);
+    transform: translateX(-100%); transition: transform var(--transition-slow);
+  }
+  .sidebar.collapsed { width: var(--sidebar-w); }
+  .sidebar.drawer-open { transform: translateX(0); }
+  .sidebar .sidebar-collapse { display: none; }
+  .sidebar.collapsed .brand-name, .sidebar.collapsed .nav-label { display: revert; }
+  .sidebar.collapsed .sidebar-nav a { justify-content: flex-start; padding: 9px var(--s3); }
+
+  .sidebar-scrim.show {
+    display: block; position: fixed; inset: 0; z-index: 28;
+    background: rgba(2, 6, 14, .5); backdrop-filter: blur(1px);
+  }
+  .view { width: 92%; padding: var(--s5) 0; gap: var(--s3); }
+  .view-head h1 { font-size: 19px; }
+}

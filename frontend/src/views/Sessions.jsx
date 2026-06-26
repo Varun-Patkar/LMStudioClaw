@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { MessagesSquare, ArrowUp } from "lucide-react";
 import { get, post, del } from "../api.js";
 import { useToast } from "../components/Toast.jsx";
 import Skeleton from "../components/Skeleton.jsx";
 import RunConfig from "./RunConfig.jsx";
+import { autoGrow, SUGGESTIONS } from "../lib/ui.js";
 
 export default function Sessions() {
   const [data, setData] = useState(null);
@@ -49,11 +51,15 @@ export default function Sessions() {
     try { await del(`/api/sessions/${id}`); load(); } catch (e) { toast(e.message); }
   };
 
+  // Enter starts the session; Shift+Enter inserts a newline.
+  const onKey = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); start(); } };
+
   return (
     <>
-      <div className="card">
-        <div className="card-head"><h2>New session</h2></div>
-        <div className="row wrap">
+      <div className="hero-new">
+        <h1>What should the agent work on?</h1>
+        <p className="hero-sub muted">Pick a model, describe the task, and the agent gets to work — the model loads when the session starts.</p>
+        <div className="hero-controls">
           <select value={model} onChange={(e) => setModel(e.target.value)}>
             <option value="">{def ? `Default model (${def.display_name})` : "Default model"}</option>
             {models.filter((m) => m.key !== settings.default_model)
@@ -63,19 +69,31 @@ export default function Sessions() {
             <option value="">Default persona</option>
             {personas.filter((p) => !p.is_default).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
           </select>
-          <button className="btn green" disabled={busy} onClick={start}>
-            {busy ? <><span className="spinner" /> Starting…</> : "Start session"}
-          </button>
         </div>
-        <textarea className="session-prompt" value={prompt} rows={3}
-          placeholder="Optional: first message — the agent starts on it as soon as the session runs"
-          onChange={(e) => setPrompt(e.target.value)} />
-        <RunConfig models={models} defaultModel={settings.default_model} onChange={setRunCfg} />
+        <div className="composer2">
+          <textarea value={prompt} rows={1}
+            placeholder="Start a task…  (Enter to start, Shift+Enter for a new line)"
+            onChange={(e) => { setPrompt(e.target.value); autoGrow(e.target); }} onKeyDown={onKey} />
+          <button className="btn send-btn" disabled={busy} onClick={start} title="Start session">
+            {busy ? <span className="spinner" /> : <ArrowUp size={18} />}</button>
+        </div>
+        <div className="suggestions">
+          {SUGGESTIONS.map((s) => (
+            <button key={s} className="suggest-chip" onClick={() => setPrompt(s)}>{s}</button>
+          ))}
+        </div>
+        <RunConfig models={models} defaultModel={settings.default_model} onChange={setRunCfg} showModel={false} />
       </div>
 
       <div className="card">
-        <div className="card-head"><h2>Sessions</h2></div>
-        {sessions.length === 0 ? <p className="muted">No sessions yet.</p> : (
+        <div className="card-head"><h2>Recent sessions</h2></div>
+        {sessions.length === 0 ? (
+          <div className="empty-state">
+            <span className="ico"><MessagesSquare size={28} /></span>
+            <strong>No sessions yet</strong>
+            Start one above to begin a conversation with the agent.
+          </div>
+        ) : (
           <table>
             <thead><tr><th>Status</th><th>Trigger</th><th>Model</th><th>Started</th><th /></tr></thead>
             <tbody>
