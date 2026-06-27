@@ -31,6 +31,9 @@ EventFn = Callable[[dict], Awaitable[None]]
 DEFAULT_IDLE_TIMEOUT = 600
 # Maximum tool-call iterations within a single user turn (prevents runaway loops).
 _MAX_TOOL_ITERS = 12
+# MCP results longer than this (chars) are condensed before entering the model context
+# when ``summarize_mcp_outputs`` is on. The full output is still stored + shown in the UI.
+_MCP_SUMMARY_CHARS = 4000
 
 
 @dataclass
@@ -43,6 +46,7 @@ class SessionControl:
 
     inbox: asyncio.Queue = field(default_factory=asyncio.Queue)
     steer_buffer: list[str] = field(default_factory=list)
+    steer_signal: asyncio.Event = field(default_factory=asyncio.Event)
     stop_turn: asyncio.Event = field(default_factory=asyncio.Event)
     stop_session: asyncio.Event = field(default_factory=asyncio.Event)
     _consent_waiters: dict[str, asyncio.Future] = field(default_factory=dict)
@@ -56,8 +60,15 @@ class SessionControl:
         self.inbox.put_nowait(("message", text))
 
     def steer(self, text: str) -> None:
-        """Inject steering text into the in-progress turn (FR-057)."""
+        """Inject steering text into the in-progress turn (FR-057).
+
+        Sets ``steer_signal`` so the engine interrupts the current LLM call (stops
+        generating / drops the model's pending tool calls) and re-plans with the new
+        instruction. In-flight tool execution is *not* aborted — only the model's
+        reasoning is steered.
+        """
         self.steer_buffer.append(text)
+        self.steer_signal.set()
 
     def stop(self, scope: str = "turn") -> None:
         """Stop the current turn, or end the whole session (FR-059)."""
@@ -110,6 +121,7 @@ class Engine:
         initial_message: str | None = None,
         history: list[dict] | None = None,
         run_config=None,
+        summarize_mcp: bool = False,
     ) -> SessionResult:
         """Run the interactive loop until the session ends, stops, or fails.
 
@@ -165,10 +177,11 @@ class Engine:
                 )
 
                 control.stop_turn.clear()
+                control.steer_signal.clear()
                 await on_event({"type": "turn", "state": "start"})
                 messages, budget = await self._run_turn(
                     session_id, messages, model_id, budget, control, on_event,
-                    unattended, run_config)
+                    unattended, run_config, summarize_mcp)
                 await on_event({"type": "turn", "state": "end"})
 
                 if control.stop_session.is_set():
@@ -264,7 +277,7 @@ class Engine:
         return messages, budget
 
     async def _run_turn(self, session_id, messages, model_id, budget, control, on_event,
-                        unattended, run_config=None):
+                        unattended, run_config=None, summarize_mcp=False):
         """Run one assistant turn, resolving tool calls until a final answer.
 
         Tool results can be large (web pages, file dumps), so the budget is re-checked
@@ -288,12 +301,21 @@ class Engine:
                 messages, model_id, tools, control, on_event
             )
 
-            # Fold any steering text injected mid-turn into the conversation.
+            # Fold any steering text injected mid-turn into the conversation. Steering
+            # interrupts the model: keep whatever it generated so far, drop the tool
+            # calls it was about to make, and re-plan with the new instruction (the LLM
+            # call is stopped; in-flight tools already ran). See SessionControl.steer.
             if control.steer_buffer:
                 steer = "\n".join(control.steer_buffer)
                 control.steer_buffer.clear()
+                control.steer_signal.clear()
+                if assistant_text:
+                    messages.append({"role": "assistant", "content": assistant_text})
+                    self._store.add_turn(session_id, role="assistant", content=assistant_text,
+                                         token_estimate=budget_mod.estimate_tokens(assistant_text))
                 messages.append({"role": "user", "content": f"[steering] {steer}"})
                 self._store.add_turn(session_id, role="steer", content=steer)
+                continue
 
             if not tool_calls:
                 if assistant_text:
@@ -307,7 +329,7 @@ class Engine:
                              "tool_calls": tool_calls})
             for call in tool_calls:
                 await self._execute_tool_call(session_id, call, messages, control, on_event,
-                                              unattended)
+                                              unattended, model_id, summarize_mcp)
         return messages, budget
 
     async def _stream_completion(self, messages, model_id, tools, control, on_event):
@@ -320,7 +342,7 @@ class Engine:
         partial: dict[int, dict] = {}
         stream = await self._client.chat.completions.create(**kwargs)
         async for chunk in stream:
-            if control.stop_turn.is_set():
+            if control.stop_turn.is_set() or control.steer_signal.is_set():
                 break
             delta = chunk.choices[0].delta if chunk.choices else None
             if delta is None:
@@ -343,8 +365,16 @@ class Engine:
         ]
         return assistant_text, tool_calls
 
-    async def _execute_tool_call(self, session_id, call, messages, control, on_event, unattended):
-        """Execute one tool call through the registry and append its result."""
+    async def _execute_tool_call(self, session_id, call, messages, control, on_event,
+                                 unattended, model_id=None, summarize_mcp=False):
+        """Execute one tool call through the registry and append its result.
+
+        Large MCP results are optionally condensed before they enter the model context
+        (``summarize_mcp``): the model receives a faithful summary plus a note that it
+        can re-run the tool for full detail, while the **full** output is still
+        persisted and shown verbatim in the UI. This keeps big web/API dumps from
+        burning the context window when the detail isn't needed.
+        """
         import json
 
         name = call["function"]["name"]
@@ -363,14 +393,59 @@ class Engine:
         await on_event({"type": "tool_result", "name": name, "ok": result.ok,
                         "summary": (result.output[:200] if result.ok else result.error),
                         "meta": result.meta})
-        self._store.add_turn(session_id, role="tool",
-                             tool_result={"ok": result.ok,
-                                          "output": result.output, "error": result.error,
-                                          "meta": result.meta})
+
+        # Decide what the model sees: the full output, or a condensed summary for big
+        # MCP results. The stored turn keeps both so history/UI always have the detail.
+        context_content = result.output if result.ok else f"ERROR: {result.error}"
+        llm_summary = None
+        is_mcp = bool(result.meta and result.meta.get("action") == "mcp")
+        if (result.ok and summarize_mcp and is_mcp
+                and len(result.output or "") > _MCP_SUMMARY_CHARS):
+            summary = await self._summarize_tool_output(result.output, model_id)
+            if summary:
+                llm_summary = summary
+                server = (result.meta or {}).get("server", "?")
+                tool = (result.meta or {}).get("tool", "?")
+                context_content = (
+                    f"[Condensed output from MCP tool {server}·{tool} — "
+                    f"{len(result.output)} chars summarized. Re-run the tool if you need "
+                    f"the full, unsummarized result.]\n{summary}"
+                )
+
+        tool_result = {"ok": result.ok, "output": result.output, "error": result.error,
+                       "meta": result.meta}
+        if llm_summary is not None:
+            tool_result["llm_summary"] = llm_summary
+        self._store.add_turn(session_id, role="tool", tool_result=tool_result)
         messages.append({
             "role": "tool", "tool_call_id": call["id"],
-            "content": result.output if result.ok else f"ERROR: {result.error}",
+            "content": context_content,
         })
+
+    async def _summarize_tool_output(self, output: str, model_id: str | None) -> str:
+        """Condense a large tool result into a faithful, compact summary.
+
+        Returns an empty string on any failure so the caller falls back to the full
+        output (never loses data on a summarization hiccup).
+        """
+        if not model_id:
+            return ""
+        system = (
+            "You are condensing a tool's output so it takes less context space. Produce "
+            "a faithful, compact summary that preserves the concrete facts, data points, "
+            "names, numbers, URLs, and any results the user/agent is likely to need. Do "
+            "not invent details and do not include secret values. Output only the summary."
+        )
+        try:
+            resp = await self._client.chat.completions.create(
+                model=model_id,
+                messages=[{"role": "system", "content": system},
+                          {"role": "user", "content": output[:24000]}],
+                max_tokens=600, temperature=0.2,
+            )
+            return resp.choices[0].message.content or ""
+        except Exception:  # pragma: no cover - network/runtime dependent
+            return ""
 
     def _make_consent_fn(self, session_id, control: SessionControl, on_event, unattended):
         """Build the async consent callback the registry uses for file access."""

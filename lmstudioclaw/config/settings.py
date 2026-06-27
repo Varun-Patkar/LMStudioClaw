@@ -37,6 +37,7 @@ class Settings:
     compression_threshold: float = 0.90         # fraction of context (FR-061)
     max_run_duration: int = 3600                # seconds hard cap per run (FR-062)
     retention_days: int = 90                    # session history window (FR-051)
+    summarize_mcp_outputs: bool = True          # condense large MCP results before context
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict for JSON persistence."""

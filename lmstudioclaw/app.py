@@ -501,6 +501,7 @@ class Controller:
                     max_run_duration=self.settings.max_run_duration,
                     unattended=unattended, initial_message=initial_message,
                     history=history, run_config=run_config,
+                    summarize_mcp=self.settings.summarize_mcp_outputs,
                 )
                 self.store.update_session(
                     session_id, status=result.status,

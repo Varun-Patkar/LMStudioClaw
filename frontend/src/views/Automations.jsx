@@ -4,6 +4,7 @@ import { get, post, patch, del } from "../api.js";
 import { useToast } from "../components/Toast.jsx";
 import Skeleton from "../components/Skeleton.jsx";
 import RunConfig from "./RunConfig.jsx";
+import InfoTip from "../components/InfoTip.jsx";
 
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -14,6 +15,7 @@ export default function Automations() {
     interval_unit: "minutes", interval_value: 30, session_mode: "new", persona_id: "",
   });
   const [runCfg, setRunCfg] = useState(null);
+  const [runImmediately, setRunImmediately] = useState(false);
   const toast = useToast();
 
   const load = () => Promise.all([
@@ -42,7 +44,16 @@ export default function Automations() {
     const body = { ...form, name: form.name.trim(), task: form.task.trim(), persona_id: form.persona_id || null, run_config: runCfg };
     if (form.schedule_type === "daily") { delete body.interval_unit; delete body.interval_value; }
     else { delete body.daily_days; delete body.daily_time; }
-    try { await post("/api/automations", body); toast("Scheduled task created."); load(); }
+    try {
+      const { id } = await post("/api/automations", body);
+      if (runImmediately && id) {
+        await post(`/api/automations/${id}/run`, {});
+        toast("Scheduled task created and queued to run now.");
+      } else {
+        toast("Scheduled task created.");
+      }
+      load();
+    }
     catch (e) { toast(e.message); }
   };
 
@@ -67,7 +78,7 @@ export default function Automations() {
         <div className="card-head"><h2>New scheduled task</h2></div>
         <input placeholder="Name" value={form.name} onChange={(e) => set({ name: e.target.value })} />
         <textarea placeholder="Task / instruction for the agent" value={form.task} onChange={(e) => set({ task: e.target.value })} />
-        <div className="row"><span className="muted">Schedule</span>
+        <div className="row"><span className="muted">Schedule<InfoTip text="How often this task runs on its own. Daily runs on the days/time you pick; Interval runs every N minutes/hours/days." /></span>
           <select value={form.schedule_type} onChange={(e) => set({ schedule_type: e.target.value })}>
             <option value="daily">Daily</option><option value="interval">Interval</option>
           </select>
@@ -92,7 +103,7 @@ export default function Automations() {
             </select>
           </div>
         )}
-        <div className="row"><span className="muted">Mode</span>
+        <div className="row"><span className="muted">Mode<InfoTip text="New session each run starts fresh every time. Persistent session resumes the same conversation so the agent remembers previous runs." /></span>
           <select value={form.session_mode} onChange={(e) => set({ session_mode: e.target.value })}>
             <option value="new">New session each run</option><option value="persistent">Persistent session (resume)</option>
           </select>
@@ -102,7 +113,12 @@ export default function Automations() {
           </select>
         </div>
         <RunConfig models={models} defaultModel={settings.default_model} onChange={setRunCfg} />
-        <button className="btn green" onClick={create}>Create automation</button>
+        <label className="check" style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <input type="checkbox" checked={runImmediately} onChange={(e) => setRunImmediately(e.target.checked)} />
+          Run now (otherwise it starts on the next scheduled trigger)
+          <InfoTip text="Also queue the task to run once right away, in addition to its schedule. Leave unchecked to wait for the next scheduled trigger." />
+        </label>
+        <button className="btn green" onClick={create}>{runImmediately ? "Create and run automation" : "Create automation"}</button>
       </div>
 
       <div className="card">

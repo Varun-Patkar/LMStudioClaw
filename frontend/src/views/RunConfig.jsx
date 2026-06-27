@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import { get } from "../api.js";
+import InfoTip from "../components/InfoTip.jsx";
 
 /**
  * Collapsible per-run configuration: model, custom-tool toggles, and MCP selection
@@ -24,6 +25,15 @@ export default function RunConfig({ models, defaultModel, onChange, showModel = 
   const [open, setOpen] = useState(false);         // whole panel open/closed
 
   useEffect(() => { get("/api/tools").then(setTools).catch(() => {}); }, []);
+
+  // Default each MCP server's per-run toggle to its GLOBAL enabled state (set in
+  // Skills & Tools). A globally-disabled server starts off here, but can still be
+  // switched on for this single run when needed.
+  useEffect(() => {
+    const off = {};
+    (tools.mcp || []).forEach((m) => { if (m.enabled === false) off[m.name] = true; });
+    setMcpOff(off);
+  }, [tools]);
 
   useEffect(() => {
     // Custom-tool overrides + per-MCP-tool overrides share the tool_overrides map.
@@ -55,7 +65,7 @@ export default function RunConfig({ models, defaultModel, onChange, showModel = 
 
       {showModel && (
         <div className="field">
-          <label>Model</label>
+          <label>Model<InfoTip text="Which LM Studio model to load for this run. Leave on Default to use the model set in Settings." /></label>
           <select value={model} onChange={(e) => setModel(e.target.value)}>
             <option value="">{def ? `Default model (${def.display_name})` : "Default model"}</option>
             {models.filter((m) => m.key !== defaultModel)
@@ -65,7 +75,7 @@ export default function RunConfig({ models, defaultModel, onChange, showModel = 
       )}
 
       <div className="field">
-        <label>Default tools (always on)</label>
+        <label>Default tools (always on)<InfoTip text="Built-in tools the agent can always use: read/list/write/edit files, search (grep/find), run PowerShell, and run independent calls in parallel. File and shell access still asks your permission for anything outside allowed folders." /></label>
         <div className="chip-row">
           {tools.builtin.map((t) => (
             <span className="tool-chip" key={t.name} title={t.description || "Default tool — always available"}>{t.name}</span>
@@ -75,7 +85,7 @@ export default function RunConfig({ models, defaultModel, onChange, showModel = 
 
       {tools.tools.length > 0 && (
         <div className="field">
-          <label>Custom tools (toggle off to disable for this run)</label>
+          <label>Custom tools (toggle off to disable for this run)<InfoTip text="Your own Python tools from Skills & Tools. Toggle one off to hide it from the agent for this run only — your global setting is unchanged." /></label>
           <div className="tool-grid">
             {tools.tools.map((t) => (
               <label className="check" key={t.name} title={t.description || t.name}>
@@ -90,7 +100,7 @@ export default function RunConfig({ models, defaultModel, onChange, showModel = 
 
       {mcpServers.length > 0 && (
         <div className="field">
-          <label>MCP servers &amp; tools for this run</label>
+          <label>MCP servers &amp; tools for this run<InfoTip text="MCP servers give the agent extra tools. Each server defaults to its global state from Skills & Tools; switch one on or off (or expand it to pick individual tools) for this run only. A server marked ‘off globally’ can be opted in here when you need it." /></label>
           <div className="mcp-tree">
             {mcpServers.map((srv) => {
               const serverOn = !mcpOff[srv.name];
@@ -109,6 +119,7 @@ export default function RunConfig({ models, defaultModel, onChange, showModel = 
                         onChange={(e) => setMcpOff((m) => ({ ...m, [srv.name]: !e.target.checked }))} />
                       <strong>{srv.name}</strong>
                       {srv.status === "connect_failed" && <span className="mcp-failed"> failed</span>}
+                      {srv.enabled === false && <span className="muted mcp-count"> · off globally</span>}
                     </label>
                     {srv.tools.length > 0 && <span className="muted mcp-count">{srv.tools.length} tools</span>}
                   </div>

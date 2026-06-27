@@ -118,6 +118,11 @@ class CapabilityRegistry:
         self._vault = vault
         # Extra (non-built-in) tools registered by skills/tools/mcp modules.
         self._extra_tools: dict[str, ToolSpec] = {}
+        # MCP servers present in mcp.json but globally disabled. Their tools are still
+        # registered (from the cached tool list) so a user can opt the server into an
+        # individual run, but they are excluded from the default toolset (a disabled
+        # server is never spawned at scan time — it connects on-demand per call).
+        self._disabled_mcp: set[str] = set()
         self._skills: list[SkillDoc] = []
         # Map of skill name -> {script_name: absolute_path} for the script runner.
         self._skill_scripts: dict[str, dict[str, str]] = {}
@@ -236,6 +241,15 @@ class CapabilityRegistry:
             })
             cap = self._store.get_capability(cap_id)
             if not (cap and cap["enabled"]):
+                # Globally disabled: don't spawn it, but register its previously
+                # discovered tools (from cached metadata) so it can still be opted
+                # into a single run. Excluded from the default toolset.
+                self._disabled_mcp.add(server.name)
+                meta = self._cap_metadata(cap)
+                for t in meta.get("tools") or []:
+                    self.register_tool(self._wrap_mcp_tool(
+                        server, {"name": t.get("name", ""),
+                                 "description": t.get("description", ""), "parameters": {}}))
                 continue
             try:
                 tools = list_tools(self._resolve_secrets(server))
@@ -255,6 +269,22 @@ class CapabilityRegistry:
             })
             for tool in tools:
                 self.register_tool(self._wrap_mcp_tool(server, tool))
+
+    @staticmethod
+    def _cap_metadata(cap) -> dict:
+        """Return a capability row's ``metadata`` as a dict (it may be a JSON string).
+
+        ``get_capability`` does not decode ``metadata``, so parse defensively here.
+        """
+        import json
+
+        meta = (cap or {}).get("metadata")
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except (ValueError, TypeError):
+                meta = None
+        return meta if isinstance(meta, dict) else {}
 
     def _resolve_secrets(self, server):
         """Return a copy of ``server`` with ``${secret:REF}`` env/headers resolved.
@@ -374,6 +404,7 @@ class CapabilityRegistry:
     def reset_extras(self) -> None:
         """Clear externally registered tools/skills before a re-scan."""
         self._extra_tools.clear()
+        self._disabled_mcp.clear()
         self._skills.clear()
         self._skill_scripts.clear()
         self._skill_secrets.clear()
@@ -414,7 +445,18 @@ class CapabilityRegistry:
     # -- surfaces offered to the engine ------------------------------------
 
     def enabled_tools(self) -> list[ToolSpec]:
-        """Return all callable tools: built-in filesystem + registered extras."""
+        """Return the default toolset: built-ins + extras from globally-enabled servers.
+
+        Tools belonging to a globally-disabled MCP server are excluded here (the
+        default), but remain available via :meth:`all_tools` so a run config can opt
+        the server in for a single run.
+        """
+        extras = [t for name, t in self._extra_tools.items()
+                  if not ("__" in name and name.split("__", 1)[0] in self._disabled_mcp)]
+        return [*self._builtin_tools(), *extras]
+
+    def all_tools(self) -> list[ToolSpec]:
+        """Return every callable tool, including those from globally-disabled servers."""
         return [*self._builtin_tools(), *self._extra_tools.values()]
 
     def mcp_server_names(self) -> list[str]:
@@ -455,14 +497,16 @@ class CapabilityRegistry:
         warnings: list[str] = []
         known_servers = set(self.mcp_server_names())
 
-        # 1. MCP selection — scope active servers for this run only.
+        # 1. MCP selection — scope active servers for this run only. An explicit
+        # selection starts from the full tool set so a globally-disabled server can be
+        # opted in for this run; ``None`` keeps the global default (disabled excluded).
         selection = getattr(run_config, "mcp_selection", None)
         if selection is not None:
             selected = set(selection)
             for missing in selected - known_servers:
                 warnings.append(f"Unknown MCP server '{missing}' in run config; ignored.")
             kept: list[ToolSpec] = []
-            for tool in tools:
+            for tool in self.all_tools():
                 if "__" in tool.name:
                     server = tool.name.split("__", 1)[0]
                     if server in known_servers and server not in selected:
@@ -489,7 +533,7 @@ class CapabilityRegistry:
         self, name: str, args: dict[str, Any], *, consent: ConsentFn
     ) -> ToolResult:
         """Dispatch a tool call by name with a per-call timeout (FR-018)."""
-        tool = next((t for t in self.enabled_tools() if t.name == name), None)
+        tool = next((t for t in self.all_tools() if t.name == name), None)
         if tool is None:
             return ToolResult(False, "", error=f"Unknown tool: {name}")
         try:

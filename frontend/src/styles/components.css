@@ -201,6 +201,39 @@ tbody td:first-child { font-weight: 550; }
 .composer2 textarea:hover, .composer2 textarea:focus { border: none; box-shadow: none; background: transparent; }
 .composer2 .send-btn { flex: none; width: 38px; height: 38px; border-radius: 12px; padding: 0; }
 .composer2 .send-btn .spinner { border-color: rgba(255,255,255,.4); border-top-color: #fff; }
+/* Steer / queue variants of the composer action button (shown while a turn runs). */
+.composer2 .send-btn.steer { background: var(--accent); color: #fff; }
+.composer2 .send-btn.steer.queue { background: var(--amber); color: #1a1205; }
+
+/* One-line hint shown above the composer while typing during a live turn. */
+.composer-tip { font-size: 11.5px; color: var(--fg-dim); padding: 0 var(--s1); }
+.composer-tip kbd {
+  font: inherit; font-size: 10.5px; background: var(--bg-elev-2); border: 1px solid var(--border);
+  border-bottom-width: 2px; border-radius: 5px; padding: 0 5px; color: var(--fg); margin: 0 1px;
+}
+
+/* Pending (lined-up) messages waiting for the current turn to end. */
+.msg-queue { display: flex; flex-direction: column; gap: 4px; }
+.msg-queue .mq-row {
+  display: flex; align-items: center; gap: var(--s2); padding: 5px 8px;
+  border: 1px dashed var(--border); border-radius: var(--radius-sm); background: var(--bg-input);
+  font-size: 12.5px;
+}
+.msg-queue .mq-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--amber); flex: none; }
+.msg-queue .mq-type { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--amber); flex: none; }
+.msg-queue .mq-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-dim); }
+.msg-queue .mq-act {
+  flex: none; display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--border);
+  background: transparent; color: var(--fg-dim); cursor: pointer; padding: 2px 7px; border-radius: 6px;
+  font-size: 11.5px; opacity: 0; transition: opacity var(--transition), color var(--transition), border-color var(--transition);
+}
+.msg-queue .mq-cancel {
+  flex: none; border: none; background: transparent; color: var(--fg-dim); cursor: pointer;
+  padding: 2px 4px; border-radius: 6px; line-height: 1; opacity: 0; transition: opacity var(--transition), color var(--transition);
+}
+.msg-queue .mq-row:hover .mq-act, .msg-queue .mq-row:hover .mq-cancel { opacity: 1; }
+.msg-queue .mq-act:hover { color: var(--accent); border-color: var(--accent-line); }
+.msg-queue .mq-cancel:hover { color: var(--red); background: color-mix(in srgb, var(--red) 14%, transparent); }
 
 /* New-task hero (Sessions) */
 .hero-new { display: flex; flex-direction: column; align-items: center; text-align: center; gap: var(--s4); padding: clamp(20px, 7vh, 80px) 0 var(--s4); }
@@ -224,7 +257,7 @@ tbody td:first-child { font-weight: 550; }
 .chat-col { display: flex; flex-direction: column; min-height: calc(100vh - 130px); }
 .chat-head { display: flex; align-items: center; gap: var(--s3); padding-bottom: var(--s3); margin-bottom: var(--s3); border-bottom: 1px solid var(--border); }
 .chat-head h2 { font-size: 16px; }
-.chat-mid { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.chat-mid { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
 .chat-col.hero .chat-mid { justify-content: center; align-items: center; text-align: center; gap: var(--s5); }
 .chat-body { flex: 1; min-height: 0; overflow-y: auto; padding-right: var(--s2); }
 .chat-greet h1 { font-size: clamp(22px, 2.6vw, 30px); font-weight: 720; letter-spacing: -.02em; margin: 0 0 var(--s2); }
@@ -232,6 +265,55 @@ tbody td:first-child { font-weight: 550; }
 .composer-wrap { width: 100%; display: flex; flex-direction: column; gap: var(--s2); margin-top: var(--s3); }
 .chat-col.hero .composer-wrap { max-width: 720px; margin-top: 0; }
 .chat-col.hero .suggestions { max-width: 720px; }
+
+/* Right-edge question navigator (ChatGPT-style): one segment per user question.
+   Default state is a stack of thin dashes; hovering ANYWHERE on the strip expands
+   every question into a readable, clickable list (no need to aim at one dash). */
+.msg-nav {
+  position: fixed; right: 10px; top: 50%; transform: translateY(-50%);
+  display: flex; flex-direction: column; align-items: flex-end; gap: 7px;
+  padding: 8px; z-index: 30; border-radius: var(--radius);
+  border: 1px solid transparent;
+  transition: background var(--transition), box-shadow var(--transition),
+    border-color var(--transition), gap var(--transition);
+}
+.msg-nav:hover {
+  background: var(--bg-elev); border-color: var(--border); box-shadow: var(--shadow-pop); gap: 3px;
+}
+.msg-nav .nav-seg {
+  display: flex; align-items: center; justify-content: flex-end; gap: 8px;
+  border: none; background: none; padding: 2px; cursor: pointer; width: auto; max-width: 320px;
+  border-radius: var(--radius-sm); transition: background var(--transition);
+}
+.msg-nav:hover .nav-seg { width: 100%; padding: 4px 6px; }
+.msg-nav:hover .nav-seg:hover { background: var(--bg-elev-2); }
+.msg-nav .nav-bar {
+  width: 16px; height: 3px; flex: none; border-radius: 999px; background: var(--border);
+  transition: width var(--transition), background var(--transition);
+}
+.msg-nav .nav-seg.active .nav-bar { width: 24px; background: var(--accent); }
+.msg-nav .nav-label-text {
+  max-width: 0; opacity: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-dim);
+  transition: max-width var(--transition), opacity var(--transition), color var(--transition);
+}
+.msg-nav:hover .nav-label-text { max-width: 280px; opacity: 1; }
+.msg-nav .nav-seg.active .nav-label-text { color: var(--fg); }
+.msg-nav .nav-label-text .nav-num {
+  flex: none; font-size: 10px; font-weight: 700; color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent); border-radius: 5px; padding: 0 5px;
+}
+
+/* Floating "scroll to latest" button shown when the transcript isn't at the bottom. */
+.scroll-bottom {
+  position: absolute; right: 14px; bottom: 108px; z-index: 25;
+  width: 36px; height: 36px; border-radius: 50%; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--bg-elev); color: var(--fg); border: 1px solid var(--border);
+  box-shadow: var(--shadow-pop); cursor: pointer;
+  transition: background var(--transition), border-color var(--transition), transform var(--transition);
+}
+.scroll-bottom:hover { background: var(--bg-elev-2); border-color: var(--accent-line); transform: translateY(-1px); }
 
 /* Right rail (always-visible run configuration) */
 .rail { position: sticky; top: var(--s5); display: flex; flex-direction: column; gap: var(--s4); }
@@ -386,6 +468,33 @@ tbody td:first-child { font-weight: 550; }
 .cap-main { flex: 1; min-width: 0; }
 .cap-name { font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: var(--s2); }
 .cap-desc { color: var(--fg-dim); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---- InfoTip (hover help icon used app-wide) ------------------------------- */
+.infotip {
+  position: relative; display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; border-radius: 50%; color: var(--fg-dim); cursor: help;
+  vertical-align: middle; flex: none; outline: none;
+  transition: color var(--transition), background var(--transition);
+}
+.infotip:hover, .infotip:focus-visible { color: var(--accent); background: var(--accent-soft); }
+.infotip .infotip-bubble {
+  position: absolute; z-index: 60; width: max-content; max-width: 260px;
+  background: var(--bg-elev); color: var(--fg); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow-pop);
+  padding: 7px 10px; font-size: 12px; font-weight: 400; line-height: 1.45; letter-spacing: 0;
+  white-space: normal; text-align: left; text-transform: none;
+  opacity: 0; pointer-events: none; transform: translateY(2px);
+  transition: opacity var(--transition), transform var(--transition);
+}
+.infotip:hover .infotip-bubble, .infotip:focus-visible .infotip-bubble { opacity: 1; transform: translateY(0); }
+.infotip.top .infotip-bubble { bottom: calc(100% + 6px); left: 50%; translate: -50% 0; }
+.infotip.bottom .infotip-bubble { top: calc(100% + 6px); left: 50%; translate: -50% 0; }
+.infotip.right .infotip-bubble { left: calc(100% + 8px); top: 50%; translate: 0 -50%; }
+.infotip.left .infotip-bubble { right: calc(100% + 8px); top: 50%; translate: 0 -50%; }
+
+/* When a label carries a tip, keep the icon snug next to the text. */
+.set-field label { display: inline-flex; align-items: center; gap: 6px; }
+
 .cap-actions { display: flex; align-items: center; gap: var(--s2); flex: none; }
 .cap-empty { color: var(--fg-dim); font-size: 13px; padding: var(--s5); text-align: center; border: 1px dashed var(--border); border-radius: var(--radius); }
 

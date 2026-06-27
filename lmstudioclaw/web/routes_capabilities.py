@@ -69,6 +69,7 @@ async def list_tools(request: Request) -> dict:
             "name": c["name"],
             "description": c.get("description") or "",
             "status": c.get("status"),
+            "enabled": bool(c.get("enabled")),
             "tools": [{"id": f"{c['name']}__{t.get('name', '')}",
                        "name": t.get("name", ""),
                        "description": t.get("description", "")} for t in tools],

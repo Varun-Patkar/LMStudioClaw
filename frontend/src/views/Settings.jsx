@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { get, post, patch, del } from "../api.js";
 import { useToast } from "../components/Toast.jsx";
 import Skeleton from "../components/Skeleton.jsx";
+import InfoTip from "../components/InfoTip.jsx";
 
 export default function Settings() {
   const [data, setData] = useState(null);
@@ -21,8 +22,8 @@ export default function Settings() {
   const { settings, modelsResp, personas, grants } = data;
   const save = async (patchObj) => { try { return await patch("/api/settings", patchObj); } catch (e) { toast(e.message); return null; } };
 
-  const Field = ({ label, children }) => (
-    <div className="set-field"><label>{label}</label>{children}</div>
+  const Field = ({ label, hint, children }) => (
+    <div className="set-field"><label>{label}{hint && <InfoTip text={hint} />}</label>{children}</div>
   );
 
   return (
@@ -32,20 +33,20 @@ export default function Settings() {
       {/* General */}
       <div className="card">
         <div className="card-head"><h2>General</h2></div>
-        <Field label="Theme">
+        <Field label="Theme" hint="Color scheme for the app. “System” follows your Windows light/dark setting.">
           <select defaultValue={settings.theme || "system"} onChange={(e) => {
             document.documentElement.setAttribute("data-theme", e.target.value); save({ theme: e.target.value });
           }}>
             {["system", "dark", "light"].map((t) => <option key={t} value={t}>{t}</option>)}
           </select>
         </Field>
-        <Field label="Default model">
+        <Field label="Default model" hint="The LM Studio model loaded for new sessions and automations unless you pick a different one per run.">
           <select defaultValue={settings.default_model || ""} onChange={(e) => { save({ default_model: e.target.value || null }); }}>
             <option value="">None</option>
             {modelsResp.models.map((m) => <option key={m.key} value={m.key}>{m.display_name}</option>)}
           </select>
         </Field>
-        <Field label="Launch on login (start minimized)">
+        <Field label="Launch on login (start minimized)" hint="Start LMStudioClaw automatically when you sign in to Windows, minimized to the system tray.">
           <StartupToggle initial={settings.startup_launch} save={save} />
         </Field>
       </div>
@@ -55,17 +56,20 @@ export default function Settings() {
       {/* Runtime */}
       <div className="card">
         <div className="card-head"><h2>Runtime</h2></div>
-        <Field label="Unload model on idle">
+        <Field label="Unload model on idle" hint="Free your GPU/RAM by unloading the model from LM Studio after a session sits idle for the timeout below. The model reloads automatically on the next message.">
           <input type="checkbox" className="switch" defaultChecked={settings.idle_unload} onChange={(e) => save({ idle_unload: e.target.checked })} />
         </Field>
+        <Field label="Summarize large MCP outputs" hint="When an MCP tool returns a very large result, pass a concise AI summary to the model to save context space (the full result is still stored and shown to you). The agent can re-run the tool when it needs the full detail. Recommended on.">
+          <input type="checkbox" className="switch" defaultChecked={settings.summarize_mcp_outputs} onChange={(e) => save({ summarize_mcp_outputs: e.target.checked })} />
+        </Field>
         {[
-          ["Idle timeout (s)", "session_idle_timeout", 1],
-          ["Max run duration (s)", "max_run_duration", 1],
-          ["Retention (days)", "retention_days", 1],
-          ["Compression threshold (0–1)", "compression_threshold", 0.01],
-          ["Web port", "web_port", 1],
-        ].map(([label, key, step]) => (
-          <Field label={label} key={key}>
+          ["Idle timeout (s)", "session_idle_timeout", 1, "How long a session can sit with no activity before it ends and the model unloads."],
+          ["Max run duration (s)", "max_run_duration", 1, "Hard safety cap on a single run's wall-clock time. The run is force-ended if it exceeds this."],
+          ["Retention (days)", "retention_days", 1, "How long completed session history is kept before being automatically pruned."],
+          ["Compression threshold (0–1)", "compression_threshold", 0.01, "When the conversation fills this fraction of the model's context window, older turns are summarized to make room. 0.9 = compress at 90% full."],
+          ["Web port", "web_port", 1, "Local port this web UI is served on. A free port is picked automatically if this one is taken."],
+        ].map(([label, key, step, hint]) => (
+          <Field label={label} key={key} hint={hint}>
             <input type="number" step={step} defaultValue={settings[key]} onChange={(e) => save({ [key]: Number(e.target.value) })} />
           </Field>
         ))}
@@ -73,7 +77,8 @@ export default function Settings() {
 
       {/* Folder permissions */}
       <div className="card">
-        <div className="card-head"><h2>Folder permissions</h2></div>
+        <div className="card-head"><h2>Folder permissions</h2><span className="spacer" />
+          <InfoTip text="Folders the agent is allowed to read or write. It always has access to your workspace and its LMStudioClaw home; anything else it must ask for, and you can revoke a grant here at any time." /></div>
         {grants.length ? (
           <table>
             <thead><tr><th>Folder</th><th>Scope</th><th>Access</th><th /></tr></thead>

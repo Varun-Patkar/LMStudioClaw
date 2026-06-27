@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useLocation } from "react-router-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -11,7 +11,7 @@ import ToolCard from "../components/ToolCard.jsx";
 import ActivityIndicator from "../components/ActivityIndicator.jsx";
 import RunConfig from "./RunConfig.jsx";
 import { useAppStatus } from "../lib/status.js";
-import { ArrowUp, Square } from "lucide-react";
+import { ArrowUp, Square, CornerDownLeft, ListPlus, X, ChevronDown } from "lucide-react";
 import { autoGrow, SUGGESTIONS } from "../lib/ui.js";
 
 const uid = () => Math.random().toString(36).slice(2);
@@ -91,7 +91,7 @@ function coalesce(ms) {
 function Bubble({ m }) {
   if (m.role === "tool" && m.tool) {
     return (
-      <motion.div className="msg tool"
+      <motion.div className="msg tool" data-mid={m.id} data-role="tool"
         initial={{ opacity: 0, y: 8, scale: 0.98 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
         transition={{ duration: 0.18 }}>
@@ -116,6 +116,7 @@ function Bubble({ m }) {
 export default function SessionDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const toast = useToast();
 
   const [session, setSession] = useState(null);
@@ -136,13 +137,31 @@ export default function SessionDetail() {
   const [applying, setApplying] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [activeTool, setActiveTool] = useState(null);
+  // Set when this session was opened by an "Apply & continue" config change, so the
+  // brief queued window shows "Applying configuration change…" instead of the
+  // misleading "waiting for the current run" text (the prior run is being unloaded).
+  const [applyingConfig, setApplyingConfig] = useState(false);
+  // Messages the user lined up while a turn is running. They are held client-side and
+  // sent one-at-a-time when the current turn fully ends (or promoted to a live steer).
+  const [queued, setQueued] = useState([]);
+  // True while the Alt key is held, which flips the composer's primary action from
+  // "steer" (interrupt now) to "queue" (wait for the turn to end).
+  const [altDown, setAltDown] = useState(false);
+  // Scroll affordances (ChatGPT-style): whether the transcript is pinned to the bottom
+  // and which user question is currently in view (for the right-edge navigator).
+  const [atBottom, setAtBottom] = useState(true);
+  const [activeUser, setActiveUser] = useState(null);
   const appStatus = useAppStatus();
 
   const ws = useRef(null);
   const streamingId = useRef(null);
   const toolMsgId = useRef(null);
   const generatingRef = useRef(false);
+  const queuedRef = useRef([]);
+  const endedRef = useRef(false);
   const scroller = useRef(null);
+  const bodyRef = useRef(null);
+  const atBottomRef = useRef(true);
 
   // Load the session, seed transcript, and (if live) open the WebSocket.
   useEffect(() => {
@@ -163,8 +182,67 @@ export default function SessionDetail() {
     return () => { active = false; try { ws.current && ws.current.close(); } catch { /* noop */ } };
   }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Keep the transcript scrolled to the newest message.
-  useEffect(() => { if (scroller.current) scroller.current.scrollIntoView({ behavior: "smooth", block: "end" }); }, [messages]);
+  // Keep the transcript pinned to the newest message — but only while the user is
+  // already at the bottom, so scrolling up to read history isn't yanked back down.
+  useEffect(() => {
+    if (atBottomRef.current && scroller.current)
+      scroller.current.scrollIntoView({ behavior: "smooth", block: "end" });
+    recomputeScroll();
+  }, [messages]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Recompute the "at bottom" flag and which user question is currently in view. */
+  function recomputeScroll() {
+    const el = bodyRef.current;
+    if (!el) return;
+    const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    atBottomRef.current = bottom;
+    setAtBottom(bottom);
+    const rows = el.querySelectorAll(".msg.user");
+    const refTop = el.getBoundingClientRect().top + 96;
+    let current = null;
+    rows.forEach((r) => { if (r.getBoundingClientRect().top <= refTop) current = r.getAttribute("data-mid"); });
+    if (!current && rows.length) current = rows[0].getAttribute("data-mid");
+    setActiveUser(current);
+  }
+
+  /** Smooth-scroll a specific question into view (right-edge navigator click). */
+  function scrollToMessage(mid) {
+    const el = bodyRef.current?.querySelector(`[data-mid="${mid}"]`);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  /** Jump back to the latest message (the floating bottom-right button). */
+  function scrollToBottom() {
+    atBottomRef.current = true;
+    scroller.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }
+
+  // Mirror queue + ended into refs so the WebSocket callback (a stable closure) can
+  // read the latest values without being re-bound on every render.
+  useEffect(() => { queuedRef.current = queued; }, [queued]);
+  useEffect(() => { endedRef.current = ended; }, [ended]);
+
+  // Seed the "applying config" flag from the navigation that opened this session.
+  useEffect(() => { setApplyingConfig(!!location.state?.applyingConfig); }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Once the new run actually starts (active/generating), drop the applying flag so it
+  // can never re-label a later, unrelated queued window.
+  useEffect(() => { if (applyingConfig && (generating || status === "active")) setApplyingConfig(false); }, [generating, status, applyingConfig]);
+
+  // Track the Alt key so the composer can offer "Queue" (Alt) vs "Steer" (default).
+  useEffect(() => {
+    const down = (e) => { if (e.key === "Alt") setAltDown(true); };
+    const up = (e) => { if (e.key === "Alt") setAltDown(false); };
+    const blur = () => setAltDown(false);
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    window.addEventListener("blur", blur);
+    return () => {
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+      window.removeEventListener("blur", blur);
+    };
+  }, []);
 
   // Load the model list + settings once so the user can switch models between turns.
   useEffect(() => {
@@ -182,7 +260,7 @@ export default function SessionDetail() {
       switch (evt.type) {
         case "turn":
           if (evt.state === "start") { streamingId.current = null; setGen(true); }
-          else { streamingId.current = null; finalizeStreaming(); setGen(false); setStopping(false); setActiveTool(null); }
+          else { streamingId.current = null; finalizeStreaming(); setGen(false); setStopping(false); setActiveTool(null); flushNextQueued(); }
           break;
         case "status":
           setStatus(evt.status);
@@ -242,13 +320,53 @@ export default function SessionDetail() {
     setMessages((ms) => coalesce(ms.map((m) => (m.streaming ? { ...m, streaming: false } : m))));
   }
 
+  /** Append an optimistic user bubble (the engine doesn't echo interactive input). */
+  function pushUser(text) {
+    setMessages((ms) => [...ms, { id: uid(), role: "user", content: text }]);
+  }
+
+  /**
+   * Send the draft. While a turn is running this *steers* (interrupts the model with a
+   * new instruction, keeping full context); when idle it's a normal next message.
+   */
   function send() {
     const text = draft.trim();
     if (!text || !ws.current) return;
     const kind = generatingRef.current ? "steer" : "message";
     ws.current.send(JSON.stringify({ type: kind, text }));
-    setMessages((ms) => [...ms, { id: uid(), role: "user", content: text }]);
+    pushUser(text);
     setDraft("");
+  }
+
+  /** Line up the draft to be sent after the current turn fully ends (Alt+Enter). */
+  function queueDraft() {
+    const text = draft.trim();
+    if (!text) return;
+    setQueued((q) => [...q, { id: uid(), text }]);
+    setDraft("");
+  }
+
+  /** Send the first queued message once a turn ends (called from the turn-end event). */
+  function flushNextQueued() {
+    if (endedRef.current) return;
+    const q = queuedRef.current;
+    if (!q.length || !ws.current || ws.current.readyState !== 1) return;
+    const [first, ...rest] = q;
+    setQueued(rest);
+    ws.current.send(JSON.stringify({ type: "message", text: first.text }));
+    pushUser(first.text);
+  }
+
+  /** Promote a queued message to a live steer ("send now"), interrupting the turn. */
+  function steerQueued(item) {
+    setQueued((q) => q.filter((x) => x.id !== item.id));
+    if (ws.current) ws.current.send(JSON.stringify({ type: "steer", text: item.text }));
+    pushUser(item.text);
+  }
+
+  /** Drop a queued message without sending it (robust to out-of-order cancels). */
+  function cancelQueued(item) {
+    setQueued((q) => q.filter((x) => x.id !== item.id));
   }
 
   /** Ask the engine to stop the current turn. We optimistically show a "Stopping…"
@@ -290,7 +408,7 @@ export default function SessionDetail() {
       const res = await post(`/api/sessions/${id}/restart`, {
         model: cfgModel || null, run_config: cfgRun,
       });
-      navigate(`/sessions/${res.session_id}`);
+      navigate(`/sessions/${res.session_id}`, { state: { applyingConfig: true } });
     } catch (e) { toast(e.message); setApplying(false); }
   }
 
@@ -302,7 +420,12 @@ export default function SessionDetail() {
   if (!session) return <Skeleton cards={2} />;
 
   const onKey = (e) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      // While a turn is running, Alt+Enter queues for after it ends; Enter steers now.
+      if (generatingRef.current && draft.trim() && e.altKey) queueDraft();
+      else send();
+    }
   };
 
   // Derive the plain-English "what's happening now" line from the session socket
@@ -313,6 +436,8 @@ export default function SessionDetail() {
   function activityPhase() {
     if (stopping) return { variant: "stopping", text: "Stopping the current turn…" };
     if (status === "queued" || queueIdx >= 0) {
+      if (applyingConfig)
+        return { variant: "loading", text: "Applying configuration change — restarting the run…" };
       const pos = queueIdx >= 0 ? queueIdx + 1 : null;
       return { variant: "loading", text: pos
         ? `Queued — waiting for the current run (position ${pos})`
@@ -327,10 +452,13 @@ export default function SessionDetail() {
   }
   const phase = activityPhase();
 
-  // Hero (centered) mode for a brand-new, empty session; once a message exists the
-  // composer animates down to the bottom (Cowork-style). The run config + model is
-  // always visible in the right rail so it's clear which agent is running.
-  const heroMode = !ended && messages.length === 0 && !generating && status !== "queued";
+  // User questions drive the right-edge navigator (one segment per question).
+  const userQuestions = messages.filter((m) => m.role === "user" && (m.content || "").trim());
+  // Hero (centered) mode for a brand-new, empty session. It only holds while the run
+  // is genuinely idle; the moment anything starts (model loading, queued, or the first
+  // turn) the phase leaves "idle" and the composer cleanly animates down to the bottom
+  // with a "Loading model…" indicator instead of lingering centered (Cowork-style).
+  const heroMode = !ended && messages.length === 0 && phase.variant === "idle";
   const runModelName = (isActiveRun && appStatus.model?.model) || session.model_key || settings.default_model || "Default";
 
   return (
@@ -362,7 +490,7 @@ export default function SessionDetail() {
               <p>Send a message to begin — the model loads on your first turn.</p>
             </motion.div>
           ) : (
-            <div className="chat-body transcript">
+            <div className="chat-body transcript" ref={bodyRef} onScroll={recomputeScroll}>
               <AnimatePresence initial={false}>
                 {messages.map((m) => <Bubble key={m.id} m={m} />)}
               </AnimatePresence>
@@ -370,20 +498,65 @@ export default function SessionDetail() {
             </div>
           )}
 
+          {!heroMode && userQuestions.length > 1 && (
+            <div className="msg-nav" aria-label="Jump to a question">
+              {userQuestions.map((m, i) => (
+                <button key={m.id} className={"nav-seg" + (activeUser === m.id ? " active" : "")}
+                  onClick={() => scrollToMessage(m.id)} title={m.content}>
+                  <span className="nav-label-text"><span className="nav-num">{i + 1}</span>{m.content}</span>
+                  <span className="nav-bar" />
+                </button>
+              ))}
+            </div>
+          )}
+
+          {!heroMode && !atBottom && (
+            <button className="scroll-bottom" onClick={scrollToBottom} title="Scroll to latest">
+              <ChevronDown size={18} />
+            </button>
+          )}
+
           {!ended && (
-            <motion.div layout className="composer-wrap" transition={{ duration: 0.34, ease: [0.4, 0, 0.2, 1] }}>
+            <motion.div layout layoutDependency={heroMode} className="composer-wrap"
+              transition={{ duration: 0.34, ease: [0.4, 0, 0.2, 1] }}>
               {(!heroMode || phase.variant !== "idle") && (
                 <ActivityIndicator variant={phase.variant} text={phase.text} />
+              )}
+              {queued.length > 0 && (
+                <div className="msg-queue">
+                  {queued.map((q) => (
+                    <div className="mq-row" key={q.id}>
+                      <span className="mq-dot" />
+                      <span className="mq-type">Queued</span>
+                      <span className="mq-label" title={q.text}>{q.text}</span>
+                      <button className="mq-act" title="Send now (steer)" onClick={() => steerQueued(q)}>
+                        <CornerDownLeft size={13} /> Send now</button>
+                      <button className="mq-cancel" title="Cancel" onClick={() => cancelQueued(q)}>
+                        <X size={13} /></button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {generating && draft.trim() && (
+                <div className="composer-tip">
+                  Press <kbd>Enter</kbd> to steer · <kbd>Alt</kbd>+<kbd>Enter</kbd> to queue
+                </div>
               )}
               <div className="composer2">
                 <textarea value={draft} rows={1}
                   placeholder="Message the agent…  (Enter to send, Shift+Enter for a new line)"
                   onChange={(e) => { setDraft(e.target.value); autoGrow(e.target); }} onKeyDown={onKey} />
-                {generating
-                  ? <button className="btn red send-btn working" disabled={stopping} onClick={stopTurn} title="Stop">
-                      {stopping ? <span className="spinner" /> : <Square size={15} />}</button>
-                  : <button className="btn send-btn" onClick={send} title="Send" disabled={!draft.trim()}>
-                      <ArrowUp size={18} /></button>}
+                {generating && draft.trim()
+                  ? (altDown
+                      ? <button className="btn send-btn steer queue" onClick={queueDraft} title="Queue for after this turn">
+                          <ListPlus size={16} /></button>
+                      : <button className="btn send-btn steer" onClick={send} title="Steer the agent now">
+                          <CornerDownLeft size={16} /></button>)
+                  : generating
+                    ? <button className="btn red send-btn working" disabled={stopping} onClick={stopTurn} title="Stop">
+                        {stopping ? <span className="spinner" /> : <Square size={15} />}</button>
+                    : <button className="btn send-btn" onClick={send} title="Send" disabled={!draft.trim()}>
+                        <ArrowUp size={18} /></button>}
               </div>
             </motion.div>
           )}
@@ -408,7 +581,7 @@ export default function SessionDetail() {
             {!ended && <ActivityIndicator variant={phase.variant} text={phase.text} />}
             <div className="row wrap">
               {!ended && !generating && (
-                <button className="btn ghost sm" onClick={() => setChangeOpen((o) => !o)}>{changeOpen ? "Close" : "Change model"}</button>
+                <button className="btn ghost sm" onClick={() => setChangeOpen((o) => !o)}>{changeOpen ? "Close" : "Change config"}</button>
               )}
               {!ended
                 ? <button className="btn red sm" disabled={ending} onClick={endSession}>{ending ? <><span className="spinner" /> Ending…</> : "End session"}</button>
