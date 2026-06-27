@@ -65,3 +65,21 @@ def test_registry_offers_enabled_skill_and_script(temp_app_paths):
     assert "Writer" in names
     tool_names = [t.name for t in registry.enabled_tools()]
     assert "run_skill_script" in tool_names
+
+
+def test_deleted_skill_is_pruned_on_rescan(temp_app_paths):
+    """A skill whose folder is removed disappears from the store on the next rescan."""
+    import shutil
+
+    folder = _make_skill(temp_app_paths.skills, "temp", "# Temp\nDo a thing.")
+    store = Store(temp_app_paths.db_path)
+    registry = CapabilityRegistry(temp_app_paths, store, PathGate(temp_app_paths, store))
+
+    registry.discover()
+    assert any(c["name"] == "Temp" for c in store.list_capabilities(kind="skill"))
+
+    # Delete the folder on disk and rescan — the capability row must be pruned (parity
+    # with MCP), so the UI no longer shows a skill that no longer exists.
+    shutil.rmtree(folder)
+    registry.discover()
+    assert not any(c["name"] == "Temp" for c in store.list_capabilities(kind="skill"))

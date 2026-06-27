@@ -9,9 +9,10 @@ import Skeleton from "../components/Skeleton.jsx";
 import TokenGauge from "../components/TokenGauge.jsx";
 import ToolCard from "../components/ToolCard.jsx";
 import ActivityIndicator from "../components/ActivityIndicator.jsx";
+import SkillInput from "../components/SkillInput.jsx";
 import RunConfig from "./RunConfig.jsx";
 import { useAppStatus } from "../lib/status.js";
-import { ArrowUp, Square, CornerDownLeft, ListPlus, X, ChevronDown } from "lucide-react";
+import { ArrowUp, Square, CornerDownLeft, ListPlus, X, ChevronDown, Download, FileText, ExternalLink } from "lucide-react";
 import { autoGrow, SUGGESTIONS } from "../lib/ui.js";
 
 const uid = () => Math.random().toString(36).slice(2);
@@ -151,6 +152,9 @@ export default function SessionDetail() {
   // and which user question is currently in view (for the right-edge navigator).
   const [atBottom, setAtBottom] = useState(true);
   const [activeUser, setActiveUser] = useState(null);
+  // Files the session has produced in its output folder (shown in the rail with
+  // download / open-in-VS-Code buttons; images preview inline).
+  const [outputs, setOutputs] = useState([]);
   const appStatus = useAppStatus();
 
   const ws = useRef(null);
@@ -250,6 +254,20 @@ export default function SessionDetail() {
     get("/api/settings").then(setSettings).catch(() => {});
   }, []);
 
+  // Load the session's produced files (refreshed on mount + after each tool result).
+  const loadOutputs = () =>
+    get(`/api/sessions/${id}/outputs`).then((r) => setOutputs(r.files || [])).catch(() => {});
+  useEffect(() => { loadOutputs(); }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Build a same-origin download URL for an output file (encodes each path segment). */
+  function outputUrl(name) {
+    const enc = String(name).split("/").map(encodeURIComponent).join("/");
+    return `/api/sessions/${id}/outputs/${enc}`;
+  }
+  async function openOutputInCode(path) {
+    try { await post("/api/open-in-vscode", { path }); } catch (e) { toast(e.message); }
+  }
+
   function setGen(v) { generatingRef.current = v; setGenerating(v); }
 
   function openSocket() {
@@ -294,6 +312,8 @@ export default function SessionDetail() {
             ? { ...m, tool: { ...m.tool, pending: false, ok: evt.ok,
                 summary: evt.summary || "", meta: evt.meta || null } }
             : m));
+          // A tool may have written a deliverable — refresh the Output panel.
+          loadOutputs();
           break;
         }
         case "budget": setBudget(evt); break;
@@ -543,9 +563,9 @@ export default function SessionDetail() {
                 </div>
               )}
               <div className="composer2">
-                <textarea value={draft} rows={1}
-                  placeholder="Message the agent…  (Enter to send, Shift+Enter for a new line)"
-                  onChange={(e) => { setDraft(e.target.value); autoGrow(e.target); }} onKeyDown={onKey} />
+                <SkillInput value={draft} rows={1}
+                  placeholder="Message the agent…  (Enter to send, Shift+Enter for a new line, / for skills)"
+                  onChange={setDraft} autoGrow={autoGrow} onKeyDown={onKey} />
                 {generating && draft.trim()
                   ? (altDown
                       ? <button className="btn send-btn steer queue" onClick={queueDraft} title="Queue for after this turn">
@@ -605,6 +625,32 @@ export default function SessionDetail() {
             )}
           </div>
         </div>
+
+        {outputs.length > 0 && (
+          <div className="card">
+            <div className="card-head"><h3>Output</h3><span className="spacer" />
+              <span className="muted sm">{outputs.length} file{outputs.length === 1 ? "" : "s"}</span>
+            </div>
+            <p className="muted sm">Files this session produced for you.</p>
+            <div className="output-list">
+              {outputs.map((f) => (
+                <div className="output-item" key={f.name}>
+                  {f.is_image && (
+                    <a className="output-thumb" href={outputUrl(f.name)} target="_blank" rel="noreferrer">
+                      <img src={outputUrl(f.name)} alt={f.name} loading="lazy" />
+                    </a>
+                  )}
+                  <div className="output-row">
+                    <FileText size={14} className="output-ico" />
+                    <span className="output-name" title={f.name}>{f.name}</span>
+                    <a className="icon-btn" href={outputUrl(f.name)} download title="Download"><Download size={15} /></a>
+                    <button className="icon-btn" onClick={() => openOutputInCode(f.path)} title="Open in VS Code"><ExternalLink size={14} /></button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {automation && (
           <div className="card">

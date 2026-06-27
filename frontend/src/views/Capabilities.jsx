@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import {
-  Blocks, Wrench, Server, Upload, FileText, KeyRound,
+  Blocks, Wrench, Server, Upload, FileText, KeyRound, FileCode, X, ExternalLink,
 } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { get, post, patch, del, api } from "../api.js";
 import { useToast } from "../components/Toast.jsx";
 import Skeleton from "../components/Skeleton.jsx";
@@ -16,6 +18,7 @@ import Skeleton from "../components/Skeleton.jsx";
 export default function Capabilities() {
   const [data, setData] = useState(null);
   const [tab, setTab] = useState("skills");
+  const [preview, setPreview] = useState(null);   // open skill preview (markdown + scripts)
   const toast = useToast();
 
   const load = () => Promise.all([
@@ -36,6 +39,16 @@ export default function Capabilities() {
   const badgeClass = (c) => failed(c) ? "failed" : (c.status === "valid" ? "active" : c.status);
 
   const rescan = async () => { try { await post("/api/capabilities/refresh", {}); load(); } catch (e) { toast(e.message); } };
+  // Open a skill's preview: its SKILL.md rendered as markdown + the scripts it contains.
+  const openSkill = async (c) => {
+    try { setPreview(await get(`/api/capabilities/skill/${c.id}`)); }
+    catch (e) { toast(e.message); }
+  };
+  // Open any file (a skill script) in VS Code — contents are never shown in-app.
+  const openInCode = async (path) => {
+    try { await post("/api/open-in-vscode", { path }); toast("Opening in VS Code…"); }
+    catch (e) { toast(e.message); }
+  };
   const trust = async (c) => {
     if (!confirm("Custom tools run arbitrary code. Trust this tool?")) return;
     try { await patch(`/api/capabilities/${c.id}`, { trust_confirmed: true }); load(); } catch (e) { toast(e.message); }
@@ -131,7 +144,7 @@ export default function Capabilities() {
             <div className="card-head"><h3>Skills</h3><span className="spacer" />
               <button className="btn ghost sm" onClick={rescan}>Rescan</button></div>
             <CapList items={byKind.skill} icon={<Blocks size={18} />} empty="No skills yet — add one above."
-              badgeFor={badgeFor} badgeClass={badgeClass}
+              badgeFor={badgeFor} badgeClass={badgeClass} onRowClick={openSkill}
               actions={(c) => (c.status === "valid" || c.status === "disabled") &&
                 <input type="checkbox" className="switch" checked={!!c.enabled} onChange={() => toggle(c)} title={c.enabled ? "Enabled" : "Disabled"} />} />
           </div>
@@ -185,25 +198,67 @@ export default function Capabilities() {
           <Secrets secrets={data.secrets} onSave={saveSecret} onUpdate={updateSecret} onDelete={delSecret} />
         </>
       )}
+
+      {preview && <SkillPreview skill={preview} onClose={() => setPreview(null)} onOpen={openInCode} />}
     </>
   );
 }
 
 /** A list of capability rows (icon · name · description · actions), or an empty note. */
-function CapList({ items, icon, empty, actions, badgeFor, badgeClass }) {
+function CapList({ items, icon, empty, actions, badgeFor, badgeClass, onRowClick }) {
   if (!items.length) return <div className="cap-empty">{empty}</div>;
   return (
     <div className="cap-list">
       {items.map((c) => (
         <div className="cap-row" key={c.id}>
           <div className="cap-ico">{icon}</div>
-          <div className="cap-main">
+          <div className={"cap-main" + (onRowClick ? " clickable" : "")}
+            onClick={onRowClick ? () => onRowClick(c) : undefined}
+            title={onRowClick ? "Open preview" : undefined}>
             <div className="cap-name">{c.name}<span className={"badge " + badgeClass(c)}>{badgeFor(c)}</span></div>
             {c.description && <div className="cap-desc" title={c.description}>{c.description}</div>}
           </div>
           <div className="cap-actions">{actions(c)}</div>
         </div>
       ))}
+    </div>
+  );
+}
+
+/**
+ * Skill preview modal: renders the SKILL.md as markdown and lists the skill's scripts.
+ * Script contents are intentionally not shown — clicking a script opens it in VS Code.
+ */
+function SkillPreview({ skill, onClose, onOpen }) {
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal skill-preview" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <h3>{skill.name}</h3>
+          <span className="spacer" />
+          <button className="btn ghost sm" onClick={() => onOpen(skill.path)} title="Open the skill folder in VS Code">
+            <ExternalLink size={14} /> Open folder</button>
+          <button className="icon-btn" onClick={onClose} title="Close"><X size={16} /></button>
+        </div>
+        {skill.scripts && skill.scripts.length > 0 && (
+          <div className="skill-scripts">
+            <div className="skill-scripts-head">Scripts <span className="muted">({skill.scripts.length}) — click to open in VS Code</span></div>
+            <div className="skill-script-list">
+              {skill.scripts.map((s) => (
+                <button className="skill-script" key={s.path} onClick={() => onOpen(s.path)} title={s.path}>
+                  <FileCode size={14} /> <span className="ss-name">{s.name}</span>
+                  <ExternalLink size={12} className="ss-ext" />
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        <div className="skill-md markdown">
+          {skill.markdown
+            ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{skill.markdown}</ReactMarkdown>
+            : <p className="muted">This skill has no SKILL.md content.</p>}
+        </div>
+      </div>
     </div>
   );
 }

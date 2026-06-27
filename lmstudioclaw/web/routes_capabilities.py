@@ -327,6 +327,31 @@ async def skill_template() -> dict:
     return {"filename": "SKILL.md", "content": _SKILL_TEMPLATE}
 
 
+@router.get("/api/capabilities/skill/{cap_id}")
+async def skill_detail(cap_id: str, request: Request) -> dict:
+    """Return a skill's instructions (markdown) + the scripts it contains.
+
+    Only script file names/paths are returned (never their contents) so the UI can
+    render the SKILL.md as markdown and open each script in VS Code on click (FR-074).
+    """
+    from pathlib import Path
+
+    from ..capabilities.skills import load_skill
+
+    ctrl = _ctrl(request)
+    cap = ctrl.store.get_capability(cap_id)
+    if cap is None or cap.get("kind") != "skill":
+        raise HTTPException(404, "Skill not found")
+    folder = cap.get("source_path")
+    if not folder or not Path(folder).exists():
+        raise HTTPException(404, "Skill folder not found on disk")
+    info = load_skill(Path(folder))
+    scripts = [{"name": rel, "path": str(Path(folder) / rel)} for rel in info.scripts]
+    return {"name": info.name, "path": str(folder),
+            "markdown": info.instructions, "scripts": scripts}
+
+
+
 class SkillIn(BaseModel):
     """Create a skill from explicit fields or raw uploaded SKILL.md content."""
 

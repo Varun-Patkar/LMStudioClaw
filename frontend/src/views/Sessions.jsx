@@ -5,6 +5,7 @@ import { get, post, del } from "../api.js";
 import { useToast } from "../components/Toast.jsx";
 import Skeleton from "../components/Skeleton.jsx";
 import RunConfig from "./RunConfig.jsx";
+import SkillInput from "../components/SkillInput.jsx";
 import { autoGrow, SUGGESTIONS } from "../lib/ui.js";
 
 export default function Sessions() {
@@ -71,9 +72,9 @@ export default function Sessions() {
           </select>
         </div>
         <div className="composer2">
-          <textarea value={prompt} rows={1}
-            placeholder="Start a task…  (Enter to start, Shift+Enter for a new line)"
-            onChange={(e) => { setPrompt(e.target.value); autoGrow(e.target); }} onKeyDown={onKey} />
+          <SkillInput value={prompt} rows={1}
+            placeholder="Start a task…  (Enter to start, Shift+Enter for a new line, / for skills)"
+            onChange={setPrompt} autoGrow={autoGrow} onKeyDown={onKey} />
           <button className="btn send-btn" disabled={busy} onClick={start} title="Start session">
             {busy ? <span className="spinner" /> : <ArrowUp size={18} />}</button>
         </div>

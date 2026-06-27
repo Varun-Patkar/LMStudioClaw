@@ -41,6 +41,18 @@ def _find_free_port(preferred: int, attempts: int = 20) -> int:
         return sock.getsockname()[1]
 
 
+def _parse_run_automation() -> str | None:
+    """Return the ``--run-automation <id>`` value if present (Task Scheduler launch)."""
+    import sys
+
+    argv = sys.argv[1:]
+    if "--run-automation" in argv:
+        idx = argv.index("--run-automation")
+        if idx + 1 < len(argv):
+            return argv[idx + 1]
+    return None
+
+
 def _log_startup_error(exc: BaseException) -> None:
     """Append a startup failure to %APPDATA%/LMStudioClaw/startup.log (best-effort)."""
     try:
@@ -59,6 +71,7 @@ def _log_startup_error(exc: BaseException) -> None:
 def _run() -> None:
     """Boot the controller: server on a background thread, tray on the main thread."""
     controller = Controller()
+    controller.pending_automation_id = _parse_run_automation()
     port = _find_free_port(controller.settings.web_port)
     controller.served_url = f"http://localhost:{port}"
     controller.served_port = port

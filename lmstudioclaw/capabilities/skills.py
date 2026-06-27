@@ -76,15 +76,38 @@ def load_skill(folder: Path) -> SkillInfo:
         return SkillInfo(folder.name, "", str(folder), "", valid=False,
                          error="No resolvable skill name")
 
-    scripts = sorted(
-        p.name for p in folder.iterdir()
-        if p.is_file() and p.name != "SKILL.md"
-    )
+    scripts = _discover_scripts(folder)
     secrets = meta.get("secrets") if isinstance(meta.get("secrets"), (list, dict)) else None
     return SkillInfo(
         name=name, description=description, source_path=str(folder),
         instructions=body, scripts=scripts, valid=True, secrets=secrets,
     )
+
+
+# File extensions treated as runnable scripts (vs. reference docs/assets).
+_SCRIPT_EXTS = {".py", ".sh", ".js", ".mjs", ".cjs", ".ts", ".ps1", ".bat", ".cmd", ".rb", ".pl"}
+
+
+def _discover_scripts(folder: Path) -> list[str]:
+    """Return runnable script paths in a skill folder, **including subfolders**.
+
+    Paths are relative to the skill folder (POSIX form, e.g. ``scripts/convert.py``)
+    so the agent can run them via ``run_skill_script`` using the exact reference the
+    ``SKILL.md`` uses. Only files with a script extension are included so reference
+    docs/assets aren't offered as executables. ``SKILL.md`` and hidden/cache dirs are
+    skipped.
+    """
+    skip_dirs = {".git", "__pycache__", ".venv", "node_modules", ".ipynb_checkpoints"}
+    out: list[str] = []
+    for path in folder.rglob("*"):
+        if not path.is_file() or path.name == "SKILL.md":
+            continue
+        if any(part in skip_dirs for part in path.relative_to(folder).parts[:-1]):
+            continue
+        if path.suffix.lower() in _SCRIPT_EXTS:
+            out.append(path.relative_to(folder).as_posix())
+    return sorted(out)
+
 
 
 def discover_skills(skills_dir: Path) -> list[SkillInfo]:

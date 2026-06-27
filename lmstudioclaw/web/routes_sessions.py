@@ -152,3 +152,55 @@ async def cancel_queued(session_id: str, request: Request) -> dict:
     ctrl.store.update_session(session_id, status="stopped")
     ctrl._schedule_status()
     return {"ok": True}
+
+
+# -- Session output files ("served" deliverables) ---------------------------
+
+# Extensions previewed inline in the Output panel (everything else is download-only).
+_PREVIEW_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"}
+
+
+@router.get("/api/sessions/{session_id}/outputs")
+async def list_session_outputs(session_id: str, request: Request) -> dict:
+    """List files the session produced in its output folder (name/size/kind/path).
+
+    Returned recursively so nested deliverables still show up. Never returns file
+    contents — the UI fetches each file from the download endpoint on demand.
+    """
+    ctrl = _ctrl(request)
+    out_dir = ctrl.session_output_dir(session_id)
+    files: list[dict] = []
+    if out_dir.exists():
+        for path in sorted(out_dir.rglob("*")):
+            if not path.is_file():
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            rel = path.relative_to(out_dir).as_posix()
+            files.append({
+                "name": rel,
+                "size": stat.st_size,
+                "modified": stat.st_mtime,
+                "is_image": path.suffix.lower() in _PREVIEW_IMAGE_EXTS,
+                "path": str(path),
+            })
+    return {"dir": str(out_dir), "files": files}
+
+
+@router.get("/api/sessions/{session_id}/outputs/{filename:path}")
+async def download_session_output(session_id: str, filename: str, request: Request):
+    """Serve one output file. Path-traversal-safe: the target must stay in the folder."""
+    from starlette.responses import FileResponse
+
+    ctrl = _ctrl(request)
+    out_dir = ctrl.session_output_dir(session_id).resolve()
+    target = (out_dir / filename).resolve()
+    # Reject anything that escapes the session's output folder.
+    if out_dir not in target.parents and target != out_dir:
+        raise HTTPException(403, "Path outside the session output folder")
+    if not target.is_file():
+        raise HTTPException(404, "File not found")
+    return FileResponse(str(target), filename=target.name)
+

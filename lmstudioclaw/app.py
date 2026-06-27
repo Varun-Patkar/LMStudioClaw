@@ -65,6 +65,9 @@ class Controller:
         self.scheduler = None  # set during startup (Phase 6)
         self._queue_task: asyncio.Task | None = None
         self._scheduler_task: asyncio.Task | None = None
+        # An automation id passed via ``--run-automation`` when the app is launched by a
+        # Windows Scheduled Task; run once the controller is up (then cleared).
+        self.pending_automation_id: str | None = None
         self.served_url: str = f"http://localhost:{self.settings.web_port}"
         self.served_port: int = self.settings.web_port
         # Public-URL tunnel for "See this on your phone" (started on demand).
@@ -85,6 +88,10 @@ class Controller:
         self._reconcile_interrupted_runs()
         self.queue.restore_from_store(self._restore_runner)
         await self._start_scheduler()
+        self._write_runtime_marker()
+        if getattr(self.settings, "use_task_scheduler", False):
+            self.sync_automation_tasks()
+        self._run_pending_automation()
 
     async def _start_scheduler(self) -> None:
         """Start the automation scheduler (wired in Phase 6)."""
@@ -98,8 +105,64 @@ class Controller:
             # Scheduler is optional for the MVP slice; controller still runs.
             self.scheduler = None
 
+    # -- Windows Task Scheduler integration (opt-in) -----------------------
+
+    def _runtime_marker_path(self):
+        """Path to the runtime marker file external launchers use to find us."""
+        return self.paths.app_data / "runtime.json"
+
+    def _write_runtime_marker(self) -> None:
+        """Record this live instance (url/port/pid) so taskrunner can reach it."""
+        import json
+        import os
+
+        try:
+            self._runtime_marker_path().write_text(
+                json.dumps({"url": self.served_url, "port": self.served_port,
+                            "pid": os.getpid()}),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass  # best-effort; the launcher falls back to starting a new instance
+
+    def _remove_runtime_marker(self) -> None:
+        """Remove the runtime marker on shutdown (best-effort)."""
+        try:
+            self._runtime_marker_path().unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _run_pending_automation(self) -> None:
+        """Run an automation requested at launch via ``--run-automation`` (once)."""
+        aid = self.pending_automation_id
+        self.pending_automation_id = None
+        if not aid:
+            return
+        automation = self.store.get_automation(aid)
+        if automation is not None:
+            try:
+                self.enqueue_automation(automation)
+            except Exception:
+                pass  # best-effort; controller records its own failures
+
+    def sync_automation_tasks(self) -> None:
+        """Reconcile Windows Scheduled Tasks with automations (opt-in; best-effort).
+
+        Registers a per-automation task when ``use_task_scheduler`` is on so due
+        automations fire even while the app is closed; removes all managed tasks when
+        the setting is off. No-op on non-Windows platforms / if schtasks is missing.
+        """
+        try:
+            from .automations import tasksched
+
+            tasksched.sync(self.store.list_automations(),
+                           enabled=bool(getattr(self.settings, "use_task_scheduler", False)))
+        except Exception:
+            pass
+
     async def shutdown(self) -> None:
         """Stop the queue/scheduler, unload any model, close clients (FR-043)."""
+        self._remove_runtime_marker()
         self.queue.stop()
         if self.scheduler is not None:
             self.scheduler.stop()
@@ -279,7 +342,23 @@ class Controller:
         )
         return chosen.key, ctx
 
-    def _build_system_prompt(self, persona_id: str | None, scope: str | None = None) -> str:
+    def session_output_dir(self, session_id: str, *, create: bool = False):
+        """Return (and optionally create) the per-session output folder.
+
+        Lives under the workspace (always agent-writable, no consent prompt) so the
+        agent can drop user-facing deliverables there; the UI lists them in the
+        session's Output panel.
+        """
+        path = self.paths.workspace / "outputs" / session_id
+        if create:
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
+        return path
+
+    def _build_system_prompt(self, persona_id: str | None, scope: str | None = None,
+                             session_id: str | None = None) -> str:
         """Compose the system prompt from persona, enabled skills, and learnings."""
         from .orchestrator import memory as memory_mod
 
@@ -333,8 +412,43 @@ class Controller:
             "scripts get them as environment variables. You never see the values — only "
             "the user can set them in the Secrets UI."
         )
-        for skill in self.registry.enabled_skills():
-            parts.append(f"\n## Skill: {skill.name}\n{skill.instructions}")
+        # Skills are progressively disclosed: list a catalog (name + when-to-use +
+        # SKILL.md path) instead of dumping every skill's full instructions into context.
+        # The agent reads a skill's SKILL.md on demand when it applies (or is @mentioned),
+        # so "enabled" means available — not always loaded (keeps context lean).
+        skills = self.registry.enabled_skills()
+        if skills:
+            from pathlib import Path
+
+            lines = [
+                "\n## Available skills",
+                "These skills are available to you but are NOT pre-loaded. Each lists its "
+                "name, when to use it, and the path to its SKILL.md. When a task matches a "
+                "skill — or the user explicitly references one with a slash command (e.g. "
+                "`/docx`) — first read that skill's SKILL.md with `read_file` to load its "
+                "full instructions, then follow them (including any scripts it references via "
+                "`run_skill_script` or `powershell`). Don't guess a skill's steps without "
+                "reading it.",
+            ]
+            for s in skills:
+                md = Path(s.source_path) / "SKILL.md" if s.source_path else s.name
+                lines.append(f"- **{s.name}** — {s.description or '(no description)'}\n"
+                             f"  instructions: `{md}`")
+            parts.append("\n".join(lines))
+        if session_id:
+            out_dir = self.session_output_dir(session_id)
+            parts.append(
+                "\n## Delivering files to the user\n"
+                "The user cannot browse your filesystem. To hand a file to the user "
+                "(a document, image, report, export, generated artifact, etc.), save it "
+                f"into your session output folder:\n`{out_dir}`\n"
+                "Writing a file there creates the folder automatically (it stays absent "
+                "until you actually produce a deliverable). Anything you write there "
+                "appears in the session's Output panel with a download button (images "
+                "preview inline). Use a clear filename with the correct extension, and "
+                "mention in your reply that you created it. Only put finished deliverables "
+                "here — use `workspace/` for scratch work."
+            )
         learnings = memory_mod.load_learnings(self.paths.memory, scope)
         if learnings:
             parts.append(f"\n## Remembered learnings\n{learnings}")
@@ -493,7 +607,7 @@ class Controller:
             try:
                 result: SessionResult = await self.engine.run_session(
                     session_id=session_id, model_id=loaded.key,
-                    system_prompt=self._build_system_prompt(persona_id, scope),
+                    system_prompt=self._build_system_prompt(persona_id, scope, session_id),
                     context_length=context_length or loaded.context_length or 4096,
                     control=control, on_event=on_event,
                     threshold=self.settings.compression_threshold,

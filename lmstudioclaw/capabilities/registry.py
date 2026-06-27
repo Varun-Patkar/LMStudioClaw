@@ -96,10 +96,17 @@ class ToolResult:
 
 @dataclass
 class SkillDoc:
-    """An enabled skill's injectable instructions."""
+    """An available skill: its name, description, full instructions, and folder.
+
+    Skills are progressively disclosed — the system prompt lists the name/description
+    and the SKILL.md path; the agent reads the full ``instructions`` on demand when a
+    task matches (or the user @mentions the skill), keeping context lean.
+    """
 
     name: str
     instructions: str
+    description: str = ""
+    source_path: str = ""
 
 
 class CapabilityRegistry:
@@ -144,10 +151,17 @@ class CapabilityRegistry:
         self._discover_mcp()
 
     def _discover_skills(self) -> None:
-        """Scan the skills folder, upsert rows, and register enabled valid skills."""
+        """Scan the skills folder, upsert rows, register enabled skills, prune deletions.
+
+        Skill rows whose folder no longer exists are removed so the UI stays in sync
+        with disk (parity with MCP servers) — a deleted skill stops showing after a
+        rescan.
+        """
         from .skills import discover_skills
 
+        present: set[str] = set()
         for info in discover_skills(self._paths.skills):
+            present.add(info.name)
             cap_id = self._store.upsert_capability({
                 "kind": "skill", "name": info.name,
                 "source_path": info.source_path, "description": info.description,
@@ -155,7 +169,8 @@ class CapabilityRegistry:
             })
             cap = self._store.get_capability(cap_id)
             if info.valid and cap and cap["enabled"]:
-                self.register_skill(SkillDoc(info.name, info.instructions))
+                self.register_skill(SkillDoc(info.name, info.instructions,
+                                             info.description, info.source_path))
                 if info.scripts:
                     self._skill_scripts[info.name] = {
                         script: str(Path(info.source_path) / script)
@@ -163,6 +178,10 @@ class CapabilityRegistry:
                     }
                 if getattr(info, "secrets", None):
                     self._skill_secrets[info.name] = info.secrets
+        # Prune capability rows for skill folders that were deleted from disk.
+        for row in self._store.list_capabilities(kind="skill"):
+            if row["name"] not in present:
+                self._store.delete_capability(row["id"])
         if self._skill_scripts:
             self.register_tool(self._script_runner_tool())
 

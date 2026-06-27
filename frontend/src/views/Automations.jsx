@@ -5,6 +5,7 @@ import { useToast } from "../components/Toast.jsx";
 import Skeleton from "../components/Skeleton.jsx";
 import RunConfig from "./RunConfig.jsx";
 import InfoTip from "../components/InfoTip.jsx";
+import SkillInput from "../components/SkillInput.jsx";
 
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -77,7 +78,8 @@ export default function Automations() {
       <div className="card">
         <div className="card-head"><h2>New scheduled task</h2></div>
         <input placeholder="Name" value={form.name} onChange={(e) => set({ name: e.target.value })} />
-        <textarea placeholder="Task / instruction for the agent" value={form.task} onChange={(e) => set({ task: e.target.value })} />
+        <SkillInput rows={3} value={form.task} placeholder="Task / instruction for the agent  (type / to call a skill)"
+          onChange={(v) => set({ task: v })} />
         <div className="row"><span className="muted">Schedule<InfoTip text="How often this task runs on its own. Daily runs on the days/time you pick; Interval runs every N minutes/hours/days." /></span>
           <select value={form.schedule_type} onChange={(e) => set({ schedule_type: e.target.value })}>
             <option value="daily">Daily</option><option value="interval">Interval</option>

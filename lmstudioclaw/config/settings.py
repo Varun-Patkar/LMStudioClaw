@@ -38,6 +38,7 @@ class Settings:
     max_run_duration: int = 3600                # seconds hard cap per run (FR-062)
     retention_days: int = 90                    # session history window (FR-051)
     summarize_mcp_outputs: bool = True          # condense large MCP results before context
+    use_task_scheduler: bool = False            # fire automations via Windows Task Scheduler
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict for JSON persistence."""

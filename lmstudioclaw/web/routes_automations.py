@@ -51,6 +51,8 @@ async def create_automation(payload: AutomationIn, request: Request) -> dict:
     aid = ctrl.store.create_automation(data)
     if ctrl.scheduler is not None:
         ctrl.scheduler.refresh()
+    if getattr(ctrl.settings, "use_task_scheduler", False):
+        ctrl.sync_automation_tasks()
     return {"id": aid}
 
 
@@ -63,6 +65,8 @@ async def update_automation(automation_id: str, payload: dict, request: Request)
     ctrl.store.update_automation(automation_id, **payload)
     if ctrl.scheduler is not None:
         ctrl.scheduler.refresh()
+    if getattr(ctrl.settings, "use_task_scheduler", False):
+        ctrl.sync_automation_tasks()
     return {"ok": True}
 
 
@@ -73,6 +77,12 @@ async def delete_automation(automation_id: str, request: Request) -> dict:
     ctrl.store.delete_automation(automation_id)
     if ctrl.scheduler is not None:
         ctrl.scheduler.refresh()
+    if getattr(ctrl.settings, "use_task_scheduler", False):
+        from ..automations import tasksched
+        try:
+            tasksched.unregister(automation_id)
+        except Exception:
+            pass
     return {"ok": True}
 
 

@@ -52,6 +52,9 @@ async def patch_settings(payload: dict, request: Request) -> dict:
     if "startup_launch" in payload:
         ctrl.settings.startup_launch = autostart.apply(bool(payload["startup_launch"]))
     ctrl.save()
+    if "use_task_scheduler" in payload:
+        # Register/remove the Windows Scheduled Tasks to match the new setting.
+        ctrl.sync_automation_tasks()
     return ctrl.settings.to_dict()
 
 

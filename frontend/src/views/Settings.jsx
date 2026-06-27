@@ -62,6 +62,9 @@ export default function Settings() {
         <Field label="Summarize large MCP outputs" hint="When an MCP tool returns a very large result, pass a concise AI summary to the model to save context space (the full result is still stored and shown to you). The agent can re-run the tool when it needs the full detail. Recommended on.">
           <input type="checkbox" className="switch" defaultChecked={settings.summarize_mcp_outputs} onChange={(e) => save({ summarize_mcp_outputs: e.target.checked })} />
         </Field>
+        <Field label="Run automations even when the app is closed" hint="Uses Windows Task Scheduler to launch LMStudioClaw at each automation's scheduled time, so scheduled tasks run even if the app isn't open. Only works while your PC is on and you're signed in to Windows — nothing runs while the PC is off.">
+          <input type="checkbox" className="switch" defaultChecked={settings.use_task_scheduler} onChange={(e) => save({ use_task_scheduler: e.target.checked })} />
+        </Field>
         {[
           ["Idle timeout (s)", "session_idle_timeout", 1, "How long a session can sit with no activity before it ends and the model unloads."],
           ["Max run duration (s)", "max_run_duration", 1, "Hard safety cap on a single run's wall-clock time. The run is force-ended if it exceeds this."],
