@@ -119,17 +119,37 @@ class BrainStore:
 
     def add_node(self, label: str, summary: str = "", node_type: str = "note",
                  details: str | None = None, node_id: str | None = None) -> str:
-        """Insert a node and return its id; write detail Markdown when provided."""
-        if not (label or "").strip():
+        """Insert a node and return its id; write detail Markdown when provided.
+
+        Deduplicates: if a node with the same case-insensitive ``label`` AND ``type``
+        already exists, that node is reused (its id returned) instead of creating a
+        duplicate — so re-mentioning the same entity (e.g. the owner "Varun Patkar")
+        does not spawn a second node. The existing node is enriched, not clobbered:
+        a non-empty ``summary`` updates it, and ``details`` are written only when the
+        node has none yet (use ``update_node`` to deliberately replace details).
+        """
+        label = (label or "").strip()
+        if not label:
             raise ValueError("A node needs a non-empty label.")
+        node_type = (node_type or "note").strip()
+        with self._lock:
+            existing = self._conn.execute(
+                "SELECT id FROM nodes WHERE lower(label)=lower(?) AND lower(type)=lower(?) LIMIT 1",
+                (label, node_type),
+            ).fetchone()
+        if existing:
+            eid = existing["id"]
+            new_summary = summary.strip() if (summary and summary.strip()) else None
+            new_details = details if (details and not self.read_details(eid).strip()) else None
+            self.update_node(eid, summary=new_summary, details=new_details)
+            return eid
         nid = node_id or f"{_slug(label)}-{uuid.uuid4().hex[:6]}"
         now = _now()
         with self._lock:
             self._conn.execute(
                 "INSERT INTO nodes (id, type, label, summary, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                (nid, (node_type or "note").strip(), label.strip(),
-                 (summary or "").strip(), now, now),
+                (nid, node_type, label, (summary or "").strip(), now, now),
             )
             self._conn.commit()
         if details is not None:
@@ -160,7 +180,14 @@ class BrainStore:
 
     def add_edge(self, source: str, target: str, edge_type: str = "related",
                  weight: float = 1.0) -> str:
-        """Connect two existing nodes with a typed, weighted edge; return its id."""
+        """Connect two existing nodes with a typed, weighted edge; return its id.
+
+        Idempotent: if an identical edge (same source, target, and case-insensitive
+        type) already exists it is reused (its id returned) instead of inserting a
+        duplicate — so re-linking the same relationship (common when merging/dedup'ing
+        nodes) does not produce duplicated connections in the graph or viewer.
+        """
+        etype = (edge_type or "related").strip()
         with self._lock:
             rows = self._conn.execute(
                 "SELECT id FROM nodes WHERE id IN (?, ?)", (source, target)
@@ -169,11 +196,17 @@ class BrainStore:
             missing = [n for n in (source, target) if n not in found]
             if missing:
                 raise ValueError(f"Unknown node id(s): {', '.join(missing)}")
+            dup = self._conn.execute(
+                "SELECT id FROM edges WHERE source=? AND target=? AND lower(type)=lower(?) LIMIT 1",
+                (source, target, etype),
+            ).fetchone()
+            if dup:
+                return dup["id"]
             eid = uuid.uuid4().hex
             self._conn.execute(
                 "INSERT INTO edges (id, source, target, type, weight, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                (eid, source, target, (edge_type or "related").strip(), float(weight), _now()),
+                (eid, source, target, etype, float(weight), _now()),
             )
             self._conn.commit()
         return eid
@@ -224,6 +257,18 @@ class BrainStore:
         """Return a node row as a dict (without details), or None if unknown."""
         with self._lock:
             row = self._conn.execute("SELECT * FROM nodes WHERE id = ?", (node_id,)).fetchone()
+        return dict(row) if row else None
+
+    def find_node(self, label: str, node_type: str) -> dict | None:
+        """Return an existing node matching a case-insensitive label + type, else None.
+
+        Backs deduplication: callers can tell whether ``add_node`` will reuse a node.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM nodes WHERE lower(label)=lower(?) AND lower(type)=lower(?) LIMIT 1",
+                ((label or "").strip(), (node_type or "note").strip()),
+            ).fetchone()
         return dict(row) if row else None
 
     def neighbors(self, node_id: str) -> dict:

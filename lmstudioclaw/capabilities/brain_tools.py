@@ -29,10 +29,15 @@ def register_brain_tools(registry, brain) -> None:
                         details: str | None = None, consent=None) -> ToolResult:
         """Create a memory node (summary in the graph, details in Markdown)."""
         try:
+            # Detect dedup so the result/card reflects reuse vs. a fresh node.
+            dup = brain.find_node(label, type)
             nid = brain.add_node(label, summary, type, details)
+            reused = dup is not None
+            msg = f"Reused existing node {nid}." if reused else f"Saved node {nid}."
             return ToolResult(
-                True, f"Saved node {nid}.",
-                meta={"action": "brain_add", "id": nid, "label": label, "type": type},
+                True, msg,
+                meta={"action": "brain_add", "id": nid, "label": label, "type": type,
+                      "reused": reused},
             )
         except Exception as exc:
             return ToolResult(False, "", error=f"Could not add node: {exc}")

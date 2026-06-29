@@ -558,7 +558,15 @@ class Controller:
             "and many links, not a few big ones.\n"
             "3. When fetching info from a website, first try its machine-readable file "
             "(`<site>/agents.md` or `<site>/llms.txt`) before the HTML home page — fetch it "
-            "ONCE with `fetch_url`, then decompose it into nodes as above."
+            "ONCE with `fetch_url`, then decompose it into nodes as above.\n"
+            "4. Avoid duplicates: before adding, `brain_search` for the entity and reuse the "
+            "existing node (link to it or `brain_update` it) instead of making a near-identical "
+            "one. Adding a node whose label+type already exists automatically reuses that node "
+            "rather than duplicating it.\n"
+            "5. Keep node `details` to the entity's OWN facts (prose). Do NOT paste a list of its "
+            "connections/relationships into `details` — links live as edges and are shown "
+            "automatically, so listing them in the text just duplicates them. Never copy "
+            "`brain_get` output back into a node's details."
         )
         learnings = memory_mod.load_learnings(self.paths.memory, scope)
         if learnings:

@@ -216,8 +216,8 @@ function describeBrain(meta, args) {
   const type = meta.type ? ` (${meta.type})` : "";
   switch (meta.action) {
     case "brain_add":
-      return { icon: "🧠", label: "Remembered", target: meta.label || meta.id,
-        detail: type };
+      return { icon: "🧠", label: meta.reused ? "Reused memory" : "Remembered",
+        target: meta.label || meta.id, detail: type };
     case "brain_update":
       return { icon: "🧠", label: "Updated memory", target: meta.label || meta.id,
         detail: type };

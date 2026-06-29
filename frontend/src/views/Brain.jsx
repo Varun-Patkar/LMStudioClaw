@@ -27,6 +27,7 @@ const PALETTE = [
 export default function Brain() {
   const containerRef = useRef(null);
   const cyRef = useRef(null);
+  const layoutRef = useRef(null);             // running force layout (stopped on teardown)
   const [meta, setMeta] = useState(null);            // {node_types, edge_types, counts}
   const [graph, setGraph] = useState(null);          // {nodes, edges}
   const [nodeFilter, setNodeFilter] = useState({});  // type -> bool
@@ -134,16 +135,6 @@ export default function Brain() {
         } },
         { selector: "node:active", style: { "overlay-opacity": 0.1 } },
       ],
-      // Animated force-directed layout (cose): nodes repel, edges act as springs, and
-      // ``nodeDimensionsIncludeLabels`` keeps labels from overlapping. The graph visibly
-      // settles into place, and nodes can be dragged to re-tug their neighbours' edges.
-      layout: {
-        name: "cose", animate: true, animationDuration: 800, randomize: true,
-        fit: true, padding: 50, nodeDimensionsIncludeLabels: true,
-        nodeRepulsion: 22000, idealEdgeLength: 130, edgeElasticity: 110,
-        nestingFactor: 1.2, gravity: 0.3, numIter: 2000, nodeOverlap: 24,
-        componentSpacing: 140, coolingFactor: 0.95, initialTemp: 220,
-      },
       minZoom: 0.15, maxZoom: 3,
       wheelSensitivity: 0.2,
     });
@@ -152,7 +143,29 @@ export default function Brain() {
     cy.on("tap", "node", (evt) => selectNode(evt.target.id()));
     cy.on("tap", (evt) => { if (evt.target === cy) clearFocus(); });
 
-    return () => { cy.destroy(); cyRef.current = null; };
+    // Run the force-directed layout (cose) synchronously (animate:false). The animated
+    // variant schedules requestAnimationFrame ticks that keep firing after the user
+    // navigates away — hitting the destroyed renderer and throwing "Cannot read
+    // properties of null (notify)". Computing positions in one synchronous pass yields
+    // the same force-directed layout with zero async callbacks to leak past teardown.
+    const layout = cy.layout({
+      name: "cose", animate: false, randomize: true,
+      fit: true, padding: 50, nodeDimensionsIncludeLabels: true,
+      nodeRepulsion: 22000, idealEdgeLength: 130, edgeElasticity: 110,
+      nestingFactor: 1.2, gravity: 0.3, numIter: 2000, nodeOverlap: 24,
+      componentSpacing: 140, coolingFactor: 0.95, initialTemp: 220,
+    });
+    layoutRef.current = layout;
+    layout.run();
+
+    return () => {
+      // Stop the layout + any animations BEFORE destroying so no callback hits a dead cy.
+      try { layoutRef.current && layoutRef.current.stop(); } catch { /* noop */ }
+      layoutRef.current = null;
+      try { cy.stop(); } catch { /* noop */ }
+      try { cy.destroy(); } catch { /* noop */ }
+      cyRef.current = null;
+    };
     // eslint-disable-next-line
   }, [graph, colorOf]);
 
@@ -185,12 +198,15 @@ export default function Brain() {
   function relayout() {
     const cy = cyRef.current;
     if (!cy) return;
-    cy.layout({
-      name: "cose", animate: true, animationDuration: 800, randomize: true,
+    try { layoutRef.current && layoutRef.current.stop(); } catch { /* noop */ }
+    const layout = cy.layout({
+      name: "cose", animate: false, randomize: true,
       fit: true, padding: 50, nodeDimensionsIncludeLabels: true,
       nodeRepulsion: 22000, idealEdgeLength: 130, edgeElasticity: 110,
       gravity: 0.3, numIter: 2000, nodeOverlap: 24, componentSpacing: 140,
-    }).run();
+    });
+    layoutRef.current = layout;
+    layout.run();
   }
 
   function runSearch(e) {
