@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from ..capabilities.run_config import RunConfig
+from ..sessions import logbook
 
 router = APIRouter(tags=["sessions"])
 
@@ -85,6 +86,8 @@ async def delete_session(session_id: str, request: Request) -> dict:
     if session.get("status") in ("loading", "active"):
         raise HTTPException(409, "Cannot delete an active session; end it first.")
     ctrl.store.delete_session(session_id)
+    # Also remove the detailed audit log file for this session (best-effort).
+    logbook.delete_log(ctrl.paths.logs_dir, session_id)
     return {"ok": True}
 
 

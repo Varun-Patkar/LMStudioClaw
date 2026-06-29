@@ -32,7 +32,7 @@ lmstudio = "lmstudioclaw.cli:cli"
 include = ["lmstudioclaw*"]
 
 [tool.setuptools.package-data]
-lmstudioclaw = ["config/*.yaml", "config/*.json", "web/static/**/*"]
+lmstudioclaw = ["config/*.yaml", "config/*.json", "web/static/**/*", "sessions/*.html"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

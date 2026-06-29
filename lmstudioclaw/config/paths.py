@@ -62,6 +62,9 @@ class AppPaths:
     tools: Path          # base/tools
     workspace: Path      # base/workspace (default-allowed)
     memory: Path         # base/memory
+    brain_dir: Path      # base/memory/brain  (per-node detail markdown)
+    graph_db: Path       # base/graph.db  (agent graph memory: nodes + edges)
+    logs_dir: Path       # base/logs  (detailed per-session JSON logs + HTML viewer)
     mcp_json: Path       # base/mcp.json
     app_data: Path       # %APPDATA%/LMStudioClaw  (controller state: db, settings)
     secrets_dir: Path    # %APPDATA%/LMStudioClaw/secrets  (isolated; deny-listed)
@@ -101,6 +104,9 @@ def resolve_paths() -> AppPaths:
         tools=_canon(base / "tools"),
         workspace=_canon(base / "workspace"),
         memory=_canon(base / "memory"),
+        brain_dir=_canon(base / "memory" / "brain"),
+        graph_db=_canon(base / "graph.db"),
+        logs_dir=_canon(base / "logs"),
         mcp_json=_canon(base / "mcp.json"),
         app_data=_canon(app_data),
         secrets_dir=_canon(secrets_dir),
@@ -129,6 +135,8 @@ def bootstrap(paths: AppPaths | None = None) -> tuple[AppPaths, list[str]]:
         paths.tools,
         paths.workspace,
         paths.memory,
+        paths.brain_dir,
+        paths.logs_dir,
         paths.app_data,
         paths.secrets_dir,
     ]

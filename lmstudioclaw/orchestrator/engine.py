@@ -30,10 +30,28 @@ EventFn = Callable[[dict], Awaitable[None]]
 # How long to wait for the next user message before treating the session idle.
 DEFAULT_IDLE_TIMEOUT = 600
 # Maximum tool-call iterations within a single user turn (prevents runaway loops).
-_MAX_TOOL_ITERS = 12
+# Set generously so multi-step agentic work (e.g. building a graph of many brain
+# nodes + links) completes in ONE turn instead of stopping for a manual "continue".
+# A run is still bounded by max_run_duration, the idle timeout, the token budget
+# (with compaction), and the Stop control, so this is just the per-turn loop guard.
+_MAX_TOOL_ITERS = 100
+# Transient model-API errors (e.g. LM Studio returning a 500 under load) should not
+# kill an otherwise-healthy run: retry the completion a few times with backoff first.
+_API_RETRIES = 3
+_API_RETRY_BACKOFF = 1.5  # seconds, multiplied by attempt number
 # MCP results longer than this (chars) are condensed before entering the model context
 # when ``summarize_mcp_outputs`` is on. The full output is still stored + shown in the UI.
 _MCP_SUMMARY_CHARS = 4000
+
+
+class _NullLogger:
+    """No-op detailed logger used when a run is started without one (e.g. tests)."""
+
+    def event(self, *args, **kwargs) -> None:  # noqa: D401 - trivial
+        """Ignore an event."""
+
+    def finalize(self, *args, **kwargs) -> None:
+        """Ignore finalization."""
 
 
 @dataclass
@@ -50,6 +68,9 @@ class SessionControl:
     stop_turn: asyncio.Event = field(default_factory=asyncio.Event)
     stop_session: asyncio.Event = field(default_factory=asyncio.Event)
     _consent_waiters: dict[str, asyncio.Future] = field(default_factory=dict)
+    # Futures keyed by request id for the interactive "keep going / stop" prompt that
+    # appears when a turn reaches the per-turn tool-iteration cap (resolved by the UI).
+    _continue_waiters: dict[str, asyncio.Future] = field(default_factory=dict)
 
     def message(self, text: str) -> None:
         """Enqueue a normal next message (when idle)."""
@@ -82,6 +103,12 @@ class SessionControl:
         if fut and not fut.done():
             fut.set_result(granted)
 
+    def resolve_continue(self, request_id: str, keep_going: bool) -> None:
+        """Resolve a pending 'keep going / stop' prompt with the user's choice."""
+        fut = self._continue_waiters.pop(request_id, None)
+        if fut and not fut.done():
+            fut.set_result(keep_going)
+
 
 @dataclass
 class SessionResult:
@@ -104,6 +131,23 @@ class Engine:
         self._store = store
         self._registry = registry
         self._client = client or AsyncOpenAI(base_url=openai_base, api_key=api_key, timeout=600)
+        # Detailed per-session JSON logger; replaced per run (single-active invariant).
+        self._logger = _NullLogger()
+
+    def set_client(self, openai_base: str, api_key: str) -> None:
+        """Rebuild the LM Studio client (e.g. after the user saves a new API key).
+
+        Lets a connection change made through onboarding/settings take effect without
+        restarting the controller. The previous client is closed best-effort.
+        """
+        old = self._client
+        self._client = AsyncOpenAI(base_url=openai_base, api_key=api_key, timeout=600)
+        try:
+            import asyncio
+
+            asyncio.get_running_loop().create_task(old.close())
+        except Exception:
+            pass  # best-effort cleanup; a stale client is harmless once dereferenced
 
     async def run_session(
         self,
@@ -122,6 +166,7 @@ class Engine:
         history: list[dict] | None = None,
         run_config=None,
         summarize_mcp: bool = False,
+        logger=None,
     ) -> SessionResult:
         """Run the interactive loop until the session ends, stops, or fails.
 
@@ -133,11 +178,20 @@ class Engine:
         """
         import time
 
+        self._logger = logger or _NullLogger()
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
         if history:
             messages.extend(history)
         budget = budget_mod.allocate(context_length, threshold=threshold)
         deadline = time.monotonic() + max_run_duration if max_run_duration > 0 else None
+
+        # Record the exact run parameters + full system prompt for the audit log.
+        self._logger.event(
+            "session_start", model_id=model_id, context_length=context_length,
+            threshold=threshold, idle_timeout=idle_timeout, max_run_duration=max_run_duration,
+            unattended=unattended, initial_message=initial_message,
+            history_messages=len(history or []), system_prompt=system_prompt,
+        )
 
         await on_event({"type": "status", "status": "active"})
 
@@ -171,6 +225,7 @@ class Engine:
                 messages.append({"role": "user", "content": user_text})
                 self._store.add_turn(session_id, role="user", content=user_text,
                                      token_estimate=budget_mod.estimate_tokens(user_text))
+                self._logger.event("user_message", text=user_text)
 
                 messages, budget = await self._maybe_compact(
                     session_id, messages, model_id, budget, on_event
@@ -190,6 +245,7 @@ class Engine:
             return SessionResult("completed")
         except Exception as exc:  # pragma: no cover - runtime/network dependent
             await on_event({"type": "error", "reason": str(exc), "point": "run_session"})
+            self._logger.event("error", reason=str(exc), point="run_session")
             return SessionResult("failed", failure_reason=str(exc), failure_point="run_session")
 
     # -- internals ----------------------------------------------------------
@@ -268,6 +324,11 @@ class Engine:
             )
             await on_event({"type": "compaction", "tokens_before": result.tokens_before,
                             "tokens_after": result.tokens_after})
+            self._logger.event(
+                "compaction", tokens_before=result.tokens_before,
+                tokens_after=result.tokens_after,
+                folded=len(messages) - len(result.messages), summary=result.summary,
+            )
             budget.used = result.tokens_after
             return result.messages, budget
         # Edge case: compaction could not reduce the context. Warn but proceed; if the
@@ -315,6 +376,7 @@ class Engine:
                                          token_estimate=budget_mod.estimate_tokens(assistant_text))
                 messages.append({"role": "user", "content": f"[steering] {steer}"})
                 self._store.add_turn(session_id, role="steer", content=steer)
+                self._logger.event("steer", text=steer)
                 continue
 
             if not tool_calls:
@@ -330,17 +392,59 @@ class Engine:
             for call in tool_calls:
                 await self._execute_tool_call(session_id, call, messages, control, on_event,
                                               unattended, model_id, summarize_mcp)
+        # The loop only falls through here when it exhausts ``_MAX_TOOL_ITERS`` without
+        # the model producing a final (tool-free) answer — i.e. it is still mid-task.
+        # Unattended runs can't prompt, so they just end the turn at the cap.
+        if unattended or control.stop_turn.is_set() or control.stop_session.is_set():
+            return messages, budget
+        # Interactive run: ask the user (two buttons) whether to keep iterating.
+        keep_going = await self._ask_continue(control, on_event, _MAX_TOOL_ITERS)
+        if keep_going:
+            # Run another batch with the current state (resets the per-turn counter).
+            return await self._run_turn(session_id, messages, model_id, budget, control,
+                                        on_event, unattended, run_config, summarize_mcp)
         return messages, budget
+
+    async def _ask_continue(self, control, on_event, count) -> bool:
+        """Emit a 'keep going / stop' prompt and await the user's button choice.
+
+        Mirrors the consent request/future pattern: a ``continue_request`` event is
+        pushed to the UI, which renders two buttons and sends back the decision over
+        the session WebSocket (resolving the future). Defaults to STOP on timeout.
+        """
+        import uuid
+        request_id = str(uuid.uuid4())
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        control._continue_waiters[request_id] = fut
+        await on_event({"type": "continue_request", "request_id": request_id, "count": count})
+        self._logger.event("warning", reason="tool-iteration limit reached",
+                           point="run_turn", limit=count)
+        try:
+            return await asyncio.wait_for(fut, timeout=900)
+        except asyncio.TimeoutError:
+            control._continue_waiters.pop(request_id, None)
+            return False
 
     async def _stream_completion(self, messages, model_id, tools, control, on_event):
         """Stream a single completion, emitting tokens; collect any tool calls."""
         kwargs: dict[str, Any] = {"model": model_id, "messages": messages, "stream": True}
         if tools:
             kwargs["tools"] = tools
+        # Log the EXACT payload sent to the model API (full message array + offered
+        # tools) so an audit can see precisely what the model saw each turn.
+        self._logger.event(
+            "api_request", model=model_id,
+            tools=[t.get("function", {}).get("name") for t in (tools or [])],
+            messages=messages,
+        )
         assistant_text = ""
         # Accumulate tool calls by index across streamed deltas.
         partial: dict[int, dict] = {}
-        stream = await self._client.chat.completions.create(**kwargs)
+        stream = await self._open_stream_with_retry(kwargs, control, on_event)
+        if stream is None:
+            # Stop/steer requested during backoff — abort this completion cleanly.
+            return assistant_text, []
         async for chunk in stream:
             if control.stop_turn.is_set() or control.steer_signal.is_set():
                 break
@@ -363,7 +467,45 @@ class Engine:
              "function": {"name": s["name"], "arguments": s["args"]}}
             for s in partial.values() if s["name"]
         ]
+        self._logger.event("assistant_response", text=assistant_text, tool_calls=tool_calls)
         return assistant_text, tool_calls
+
+    async def _open_stream_with_retry(self, kwargs, control, on_event):
+        """Open the streaming completion, retrying transient model-API failures.
+
+        LM Studio can intermittently return a 500 (or drop the connection) under load
+        or right after an odd request. Rather than failing the whole session on the
+        first blip, retry a few times with linear backoff, emitting a ``warning`` event
+        each attempt. Returns the stream, or ``None`` if the user asked to stop/steer
+        during backoff. Re-raises only after the retries are exhausted (which the
+        caller surfaces as a failed run, preserving prior behaviour for hard failures).
+        """
+        last_exc: Exception | None = None
+        for attempt in range(1, _API_RETRIES + 1):
+            if control.stop_turn.is_set() or control.stop_session.is_set():
+                return None
+            try:
+                return await self._client.chat.completions.create(**kwargs)
+            except Exception as exc:  # network/5xx/transport — all worth a retry here
+                last_exc = exc
+                if attempt >= _API_RETRIES:
+                    break
+                await on_event({
+                    "type": "warning",
+                    "reason": f"Model API error (attempt {attempt}/{_API_RETRIES}): {exc}. Retrying…",
+                    "point": "model_request",
+                })
+                self._logger.event("warning", reason=str(exc), point="model_request",
+                                   attempt=attempt)
+                # Linear backoff, but bail out promptly if the user stops/steers.
+                try:
+                    await asyncio.wait_for(control.stop_turn.wait(),
+                                           timeout=_API_RETRY_BACKOFF * attempt)
+                    return None  # stop_turn fired during backoff
+                except asyncio.TimeoutError:
+                    pass
+        assert last_exc is not None
+        raise last_exc
 
     async def _execute_tool_call(self, session_id, call, messages, control, on_event,
                                  unattended, model_id=None, summarize_mcp=False):
@@ -386,6 +528,7 @@ class Engine:
 
         await on_event({"type": "tool_call", "name": name, "args": args})
         self._store.add_turn(session_id, role="assistant", tool_call={"name": name, "args": args})
+        self._logger.event("tool_call", name=name, args=args, call_id=call.get("id"))
 
         consent_fn = self._make_consent_fn(session_id, control, on_event, unattended)
         result = await self._registry.invoke_tool(name, args, consent=consent_fn)
@@ -393,6 +536,8 @@ class Engine:
         await on_event({"type": "tool_result", "name": name, "ok": result.ok,
                         "summary": (result.output[:200] if result.ok else result.error),
                         "meta": result.meta})
+        self._logger.event("tool_result", name=name, ok=result.ok, output=result.output,
+                           error=result.error, meta=result.meta)
 
         # Decide what the model sees: the full output, or a condensed summary for big
         # MCP results. The stored turn keeps both so history/UI always have the detail.

@@ -30,11 +30,15 @@ def create_app(controller: Controller | None = None) -> FastAPI:
     from .routes_automations import router as automations_router
     from .routes_capabilities import router as capabilities_router
     from .routes_settings import router as settings_router
+    from .routes_brain import router as brain_router
+    from .routes_logs import router as logs_router
 
     app.include_router(sessions_router)
     app.include_router(automations_router)
     app.include_router(capabilities_router)
     app.include_router(settings_router)
+    app.include_router(brain_router)
+    app.include_router(logs_router)
 
     @app.websocket("/ws/sessions/{session_id}")
     async def _ws(websocket: WebSocket, session_id: str) -> None:

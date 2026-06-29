@@ -145,6 +145,11 @@ function describe(name, args, meta) {
     };
   }
 
+  // Graph "brain" memory actions — render as readable memory cards, never raw names.
+  if (meta?.action && meta.action.startsWith("brain_")) {
+    return describeBrain(meta, args);
+  }
+
   switch (name) {
     case "read_file": {
       const lo = args?.start_line, hi = args?.end_line;
@@ -174,6 +179,12 @@ function describe(name, args, meta) {
       return { icon: "✏️", label: "Edited", target: file, diff: true, openPath: fullPath };
     case "powershell":
       return { icon: "⌨️", label: "Ran", target: args?.command || args?.script || "command" };
+    case "fetch_url": {
+      const url = meta?.url || args?.url || "";
+      const detail = meta?.links != null ? ` · ${meta.links} links` : "";
+      return { icon: "🌐", label: "Fetched", target: meta?.title || url, detail,
+        io: { input: args?.url || url, output: summaryFromMeta(meta) } };
+    }
     case "parallel": {
       const n = Array.isArray(args?.calls) ? args.calls.length : null;
       return { icon: "⚡", label: n ? `Ran ${n} parallel operations` : "Ran parallel operations" };
@@ -185,4 +196,49 @@ function describe(name, args, meta) {
   // Generic / deletion fallbacks.
   if (meta?.action === "delete") return { icon: "🗑️", label: "Deleted", target: file };
   return { icon: "🔧", label: name || "Tool" };
+}
+
+/** Optional one-line note built from fetch meta (status/title), shown in the panel. */
+function summaryFromMeta(meta) {
+  if (!meta) return "";
+  const bits = [];
+  if (meta.title) bits.push(`Title: ${meta.title}`);
+  if (meta.status != null) bits.push(`HTTP ${meta.status}`);
+  if (meta.links != null) bits.push(`${meta.links} links`);
+  return bits.join("  ·  ");
+}
+
+/**
+ * Map a graph-memory action to a presentation descriptor.
+ * Brain meta carries: action, id, label, type, source/target(_label), query, count.
+ */
+function describeBrain(meta, args) {
+  const type = meta.type ? ` (${meta.type})` : "";
+  switch (meta.action) {
+    case "brain_add":
+      return { icon: "🧠", label: "Remembered", target: meta.label || meta.id,
+        detail: type };
+    case "brain_update":
+      return { icon: "🧠", label: "Updated memory", target: meta.label || meta.id,
+        detail: type };
+    case "brain_link": {
+      const a = meta.source_label || meta.source;
+      const b = meta.target_label || meta.target;
+      const rel = meta.type ? ` [${meta.type}] ` : " → ";
+      return { icon: "🔗", label: "Linked", target: `${a}${rel}${b}` };
+    }
+    case "brain_get":
+      return { icon: "🧠", label: "Recalled", target: meta.label || meta.id,
+        detail: meta.connections != null ? ` · ${meta.connections} links` : "" };
+    case "brain_search":
+      return { icon: "🧠", label: "Searched memory", target: meta.query || "",
+        detail: meta.count != null ? ` · ${meta.count} hits` : "" };
+    case "brain_delete":
+      return { icon: "🗑️", label: "Forgot", target: meta.label || meta.id };
+    case "brain_clear":
+      return { icon: "🧹", label: "Cleared all memory",
+        detail: meta.count != null ? ` · ${meta.count} nodes removed` : "" };
+    default:
+      return { icon: "🧠", label: "Memory", target: meta.label || meta.id || "" };
+  }
 }

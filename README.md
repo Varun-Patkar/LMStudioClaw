@@ -107,6 +107,20 @@ butler.
 
 ## Install
 
+### Easy setup (recommended for most people)
+
+Double-click **`setup.bat`** (or run `.\setup.ps1`) from the project folder. It checks
+for Python, creates the virtual environment, installs everything, builds the web UI if
+Node.js is present, and tells you how to start the app. Safe to re-run any time.
+
+Then start the app by double-clicking **`lmstudio.bat`**. On first launch a **setup
+screen opens in your browser** — if your LM Studio server is protected with an API key,
+paste it there and click **Save & continue**. This connection check runs every time the
+app starts, so you're prompted again only if LM Studio becomes unreachable or the key
+stops working.
+
+### Manual setup (developers)
+
 ```powershell
 # From the repo root (D:\Projects\LMStudioClaw)
 python -m venv venv
@@ -146,6 +160,20 @@ Or use `lmstudio.bat` (also suitable for a `shell:startup` shortcut to launch on
 - **Skills & Tools** — enable skills, trust + enable custom tools, add MCP servers
   (choose `stdio` with a command or `http`/`sse` with a URL + auth headers), set
   secrets (write-only).
+- **Brain** — an interactive view of the agent's **graph memory**: nodes (people,
+  projects, facts, decisions) connected by typed relationships, rendered with cytoscape.
+  Click a node to focus it (only its direct relations stay highlighted) and open a
+  sidebar with that node's Markdown details. Filter by node/edge type and search by name.
+  The agent builds this memory itself via tools; the page is read-only. The graph lives
+  in `Documents\LMStudioClaw\graph.db` with per-node details in `memory\brain\<id>.md`.
+- **Detailed session logs** — every run writes a fully-detailed JSON to
+  `Documents\LMStudioClaw\logs\<session_id>.json`: the full system prompt, the exact
+  messages sent to the model each turn, every tool call and its complete result in order,
+  and any context-compression events (with the compressed summary). This is the audit
+  trail for spotting prompt injection from skills/tools. Open `logs\index.html` (created
+  on first run) to browse all logs and render any one in a prettified, ordered view
+  (with a raw-JSON toggle) — it works offline; just pick the `logs` folder when asked.
+  In-app, each session links to its raw log via **Audit log**.
 - **Settings** — theme, default model, startup, timeouts, retention, compression threshold,
   personas, **Advanced → Model Management** (per-model context, manual load/unload/warmup),
   and **See this on your phone** (opens a temporary public VS Code dev tunnel + QR code

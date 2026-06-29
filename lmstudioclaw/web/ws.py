@@ -123,6 +123,8 @@ async def session_ws_endpoint(websocket: WebSocket, session_id: str, hub: Sessio
                 control.stop(msg.get("scope", "turn"))
             elif kind == "consent":
                 control.resolve_consent(msg.get("request_id", ""), bool(msg.get("granted")))
+            elif kind == "continue":
+                control.resolve_continue(msg.get("request_id", ""), bool(msg.get("keep_going")))
     except WebSocketDisconnect:
         hub.detach(session_id, websocket)
     except Exception:  # pragma: no cover - defensive

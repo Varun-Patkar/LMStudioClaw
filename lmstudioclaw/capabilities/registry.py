@@ -432,10 +432,22 @@ class CapabilityRegistry:
         """Build a tool that runs a referenced script from an enabled skill (FR-012)."""
         async def _run(*, skill: str, script: str, args: list | None = None,
                        consent: ConsentFn = None) -> ToolResult:
-            scripts = self._skill_scripts.get(skill, {})
+            scripts = self._skill_scripts.get(skill)
+            if not scripts:
+                known = sorted(self._skill_scripts)
+                hint = (f" Skills that have runnable scripts: {known}." if known
+                        else " No enabled skill currently has runnable scripts.")
+                return ToolResult(
+                    False, "",
+                    error=f"Skill '{skill}' has no runnable scripts (check the exact "
+                          f"skill name, or read its SKILL.md first).{hint}")
             path = scripts.get(script)
             if path is None:
-                return ToolResult(False, "", error=f"Unknown script '{script}' for skill '{skill}'")
+                return ToolResult(
+                    False, "",
+                    error=f"Unknown script '{script}' for skill '{skill}'. Use the exact "
+                          f"path as listed in the skill's SKILL.md — available scripts: "
+                          f"{sorted(scripts)}")
             # Inject any secrets the skill declared as env vars for the child process,
             # so the script can authenticate without the value ever reaching the agent.
             env = None
@@ -451,10 +463,15 @@ class CapabilityRegistry:
 
         return ToolSpec(
             "run_skill_script",
-            "Run a script referenced by an enabled skill.",
+            "Run a helper script that a skill documents in its SKILL.md. Read the "
+            "skill's SKILL.md first to get the exact script path and arguments — never "
+            "guess a script name.",
             {"type": "object", "properties": {
-                "skill": {"type": "string", "description": "The skill name"},
-                "script": {"type": "string", "description": "The script file name"},
+                "skill": {"type": "string",
+                          "description": "Exact skill name (as shown in Available skills)"},
+                "script": {"type": "string",
+                           "description": "Exact script path from the skill's SKILL.md, "
+                                          "e.g. 'scripts/convert_pdf_to_images.py'"},
                 "args": {"type": "array", "items": {"type": "string"},
                          "description": "Optional command-line arguments"},
             }, "required": ["skill", "script"]},
@@ -560,7 +577,11 @@ class CapabilityRegistry:
         except asyncio.TimeoutError:
             return ToolResult(False, "", error=f"Tool '{name}' timed out after {TOOL_TIMEOUT}s")
         except TypeError as exc:
-            return ToolResult(False, "", error=f"Bad arguments for '{name}': {exc}")
+            # Surface the tool's required parameters so the model can correct the call
+            # instead of repeating a malformed one.
+            required = (tool.parameters or {}).get("required") or []
+            hint = f" '{name}' requires: {required}." if required else ""
+            return ToolResult(False, "", error=f"Bad arguments for '{name}': {exc}.{hint}")
         except Exception as exc:  # pragma: no cover - defensive; tools may raise anything
             return ToolResult(False, "", error=f"Tool '{name}' failed: {exc}")
 
@@ -576,7 +597,7 @@ class CapabilityRegistry:
         this module within the modularity limit. Descriptions instruct the agent to
         read the relevant section before editing (FR-016).
         """
-        from . import file_tools, parallel_tool, shell_tool
+        from . import file_tools, parallel_tool, shell_tool, web_tool
 
         gate = self._gate
 
@@ -588,6 +609,10 @@ class CapabilityRegistry:
 
         async def _parallel(*, consent: ConsentFn = None, **kwargs) -> ToolResult:
             return await parallel_tool.run_parallel(self, consent, **kwargs)
+
+        async def _fetch_url(*, consent: ConsentFn = None, **kwargs) -> ToolResult:
+            # Network-only; no filesystem consent needed, so ``consent`` is ignored.
+            return await web_tool.fetch_url(**kwargs)
 
         path_only = {"type": "object",
                      "properties": {"path": {"type": "string", "description": "Target file or folder path"}},
@@ -629,6 +654,9 @@ class CapabilityRegistry:
                           "arguments": {"type": "object"}},
                           "required": ["tool", "arguments"]}},
         }, "required": ["calls"]}
+        fetch_param = {"type": "object", "properties": {
+            "url": {"type": "string", "description": "Web page or API URL to fetch (http/https)"},
+        }, "required": ["url"]}
 
         return [
             ToolSpec("read_file", "Read a UTF-8 text file, optionally a specific line range.",
@@ -643,7 +671,13 @@ class CapabilityRegistry:
                      grep_param, fs(file_tools.grep)),
             ToolSpec("find", "Find files by glob; returns matching paths.", find_param, fs(file_tools.find)),
             ToolSpec("powershell", "Run a PowerShell command (starts in the workspace; consent-gated; "
-                                   "bounded by a timeout).", shell_param, fs(shell_tool.powershell)),
+                                   "bounded by a timeout). Has full network access for scripting/downloads; "
+                                   "but to READ a web page or call a JSON API, prefer the `fetch_url` tool "
+                                   "(it returns clean text, not raw HTML).", shell_param, fs(shell_tool.powershell)),
+            ToolSpec("fetch_url", "Fetch a web page or HTTP/JSON API by URL and return its title, readable "
+                                  "text (HTML stripped), and links. Use this to read a website — fetch a URL "
+                                  "ONCE, then work from the returned text; do not re-fetch the same URL.",
+                     fetch_param, _fetch_url),
             ToolSpec("parallel", "Run two or more INDEPENDENT tool calls concurrently. Do not use it for "
                                  "concurrent operations on the same file.", parallel_param, _parallel),
         ]

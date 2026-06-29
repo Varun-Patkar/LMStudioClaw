@@ -60,6 +60,46 @@ def make_client(conn: Connection) -> httpx.Client:
     )
 
 
+def probe_connection(client: httpx.Client) -> dict:
+    """Classify the LM Studio connection state in a single call (no polling).
+
+    Returns a dict the onboarding flow uses to decide whether to prompt the user:
+
+    * ``reachable`` — the LM Studio server answered at all (it is running).
+    * ``authorized`` — the request succeeded (the current key, if any, is accepted).
+    * ``auth_required`` — the server is reachable but rejected us with 401/403, i.e.
+      the instance is API-key protected and our key is missing or wrong.
+
+    All three are ``False`` when LM Studio is not running / unreachable, so the caller
+    can show "start LM Studio" guidance instead of a key prompt.
+    """
+    try:
+        resp = client.get("/api/v1/models", timeout=8)
+    except httpx.HTTPError:
+        return {"reachable": False, "authorized": False, "auth_required": False}
+    if resp.status_code in (401, 403):
+        return {"reachable": True, "authorized": False, "auth_required": True}
+    return {
+        "reachable": True,
+        "authorized": resp.is_success,
+        "auth_required": False,
+    }
+
+
+def test_connection(base_url: str | None, api_key: str | None) -> dict:
+    """Probe a *candidate* base URL + key without touching the live client.
+
+    Used by the onboarding wizard's "Test connection" button so the user can verify a
+    key before saving it. The temporary client is always closed.
+    """
+    conn = load_connection(base_url=base_url, api_key=api_key)
+    client = make_client(conn)
+    try:
+        return probe_connection(client)
+    finally:
+        client.close()
+
+
 @dataclass
 class ModelInfo:
     """Discovered model metadata used by the UI and orchestrator."""

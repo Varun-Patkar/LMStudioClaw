@@ -31,6 +31,48 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full map and control flow.
 
 - **No idle polling.** Models are discovered on demand; the scheduler sleeps until the next
   fire (no busy loop). Do not add timers that poll LM Studio.
+- **Onboarding / connection check (feature: first-run).** On every UI load the SPA calls
+  `GET /api/connection` (`Controller.connection_status`), which probes LM Studio once
+  (`model/catalog.probe_connection`) and returns `reachable`/`authorized`/`auth_required`/
+  `has_key`/`needs_setup` — **never the key value**. When `needs_setup` is true the frontend
+  shows `components/SetupWizard.jsx` (a non-technical wizard) to enter the LM Studio address
+  + API key. `POST /api/connection/test` probes a candidate without saving;
+  `POST /api/connection/save` writes the key to the **vault** (ref `lmstudio_api_key`), saves
+  the base URL to settings, and rebuilds the live clients via `Controller.update_connection`
+  (which calls `Engine.set_client`) so no restart is needed. `setup.bat`/`setup.ps1` at the
+  repo root do the one-step machine setup (venv + install + UI build) for onboarding.
+- **Graph memory / brain (feature: graph memory).** A SQLite graph at
+  `Documents/LMStudioClaw/graph.db` (`orchestrator/brain.py`, `BrainStore`) holds **nodes**
+  (id, type, label, short summary) and typed **edges**; each node's full details live in a
+  Markdown file `memory/brain/<id>.md` (the node id is the filename — no path stored). It is
+  the agent's token-frugal long-term memory: **nothing is auto-injected**; the system prompt
+  only tells the agent the brain exists. The agent recalls/writes via first-party tools
+  (`capabilities/brain_tools.py`, registered per run in `Controller._prepare_registry` like
+  the `remember`/`recall` learning tools): `brain_search`, `brain_get` (details + neighbors,
+  depth 1–4), `brain_add_node`, `brain_link`, `brain_update`. These are home-area only (graph
+  db + `memory/brain`), so no consent prompt. The DB is created **empty** on first run. The
+  **Brain** page (`frontend/src/views/Brain.jsx`, nav above Settings) is a read-only cytoscape
+  viewer served from read-only routes (`web/routes_brain.py`: `/api/brain/meta|graph|node/{id}`);
+  clicking a node fades everything except it + its direct relations and opens a sidebar with the
+  node's Markdown details. The view is **lazy-loaded** (`React.lazy`) so cytoscape stays out of
+  the main bundle. Viewer is read-only — the agent owns writes.
+- **Detailed session logs (feature: audit logs).** Every run writes a fully-detailed JSON
+  to `Documents/LMStudioClaw/logs/<session_id>.json` via `sessions/logbook.py`
+  (`SessionLogger`, constructed per run in `Controller._make_runner`, passed to
+  `Engine.run_session(logger=...)` and stored as `engine._logger` for the single active
+  run). It records **ordered** events: `session_start` (full system prompt + run params),
+  `model_load`, `api_request` (the EXACT message array + offered tool names sent to the
+  model each turn), `assistant_response`, `tool_call`, `tool_result` (full output), `steer`,
+  `compaction` (incl. the compressed summary content), `warning`, `error`, `model_unload`,
+  `session_end`. This is the prompt-injection audit trail — the precise in/out sequence. It
+  is **separate** from the SQLite turn store (which drives the live chat UI); logging is
+  best-effort and never interrupts a run. Read-only endpoints `web/routes_logs.py`
+  (`/api/logs`, `/api/logs/{id}`) expose it; the session view links to the raw JSON
+  ("Audit log"). A standalone `logs/index.html` viewer (bundled `sessions/logs_viewer.html`,
+  refreshed each startup by `logbook.ensure_logs_assets`) lists all logs and renders one
+  prettified offline — it reads the JSON files via a `webkitdirectory` folder picker (works
+  on `file://`, no server). NOTE: logs live under the agent's home, so the agent could read
+  them; move to `app_data` if tamper-resistance is needed.
 - **One model at a time.** Sessions run through `sessions/queue.py` (FIFO, single active).
   Every terminal session unloads the model. The queue is **persisted** (`queued_runs`
   table) and restored on startup; an interrupted in-progress run is recorded as

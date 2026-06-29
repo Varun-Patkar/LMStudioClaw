@@ -1,6 +1,6 @@
 import { NavLink } from "react-router-dom";
 import {
-  MessagesSquare, CalendarClock, Blocks, Settings as SettingsIcon,
+  MessagesSquare, CalendarClock, Blocks, Brain, Settings as SettingsIcon,
   PanelLeftClose, PanelLeftOpen,
 } from "lucide-react";
 import Runbar from "./Runbar.jsx";
@@ -17,6 +17,7 @@ const NAV = [
   { to: "/sessions", label: "Sessions", Icon: MessagesSquare },
   { to: "/automations", label: "Scheduled", Icon: CalendarClock },
   { to: "/capabilities", label: "Skills & Tools", Icon: Blocks },
+  { to: "/brain", label: "Brain", Icon: Brain },
   { to: "/settings", label: "Settings", Icon: SettingsIcon },
 ];
 

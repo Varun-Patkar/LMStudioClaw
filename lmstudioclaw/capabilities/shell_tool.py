@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import subprocess
 
 from ..consent.path_gate import Access
 from .file_tools import authorize
@@ -31,6 +32,11 @@ from .registry import ToolResult
 # Per-call wall-clock limit and output cap (bounded execution, Constitution V).
 SHELL_TIMEOUT = 60
 _MAX_OUTPUT = 20_000
+
+# Windows: run the child process with no console window so a PowerShell window never
+# flashes onto the user's screen each time the tool fires (CREATE_NO_WINDOW). The flag
+# is absent on non-Windows, so default to 0 there.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def _powershell_exe() -> str:
@@ -52,6 +58,7 @@ async def powershell(gate, consent, *, command: str, cwd: str | None = None) -> 
             cwd=str(resolved),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            creationflags=_NO_WINDOW,
         )
     except OSError as exc:
         return ToolResult(False, "", error=f"Could not start PowerShell: {exc}")

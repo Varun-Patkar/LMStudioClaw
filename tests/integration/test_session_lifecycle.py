@@ -159,5 +159,18 @@ async def test_session_lifecycle_writes_file_and_unloads(temp_app_paths):
         assert target.exists() and target.read_text() == "summary"
         assert fake_lifecycle.loaded is True
         assert fake_lifecycle.unloaded is True
+
+        # A detailed JSON log was written with the full system prompt + ordered events.
+        import json
+
+        log_path = controller.paths.logs_dir / f"{session_id}.json"
+        assert log_path.exists()
+        doc = json.loads(log_path.read_text(encoding="utf-8"))
+        assert doc["status"] == "completed"
+        types = [e["type"] for e in doc["events"]]
+        assert "session_start" in types and "model_load" in types
+        assert "api_request" in types and "model_unload" in types and "session_end" in types
+        start = next(e for e in doc["events"] if e["type"] == "session_start")
+        assert isinstance(start["system_prompt"], str) and start["system_prompt"]
     finally:
         await controller.shutdown()

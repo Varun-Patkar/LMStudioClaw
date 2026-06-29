@@ -44,6 +44,13 @@ class Controller:
         self.store = Store(self.paths.db_path)
         self.store.ensure_default_persona()
         self.vault = SecretsVault(self.paths.secrets_dir)
+        # Graph "brain" memory (nodes + edges in graph.db; node details as Markdown).
+        # Created empty on first run; the agent reads/writes/traverses it via tools.
+        from .orchestrator.brain import BrainStore
+        self.brain = BrainStore(self.paths.graph_db, self.paths.brain_dir)
+        # Drop/refresh the standalone HTML log viewer in the logs folder (first run).
+        from .sessions import logbook as _logbook
+        _logbook.ensure_logs_assets(self.paths.logs_dir)
 
         self.connection = load_connection(
             base_url=self.settings.lmstudio_base_url,
@@ -182,6 +189,7 @@ class Controller:
         except Exception:
             pass
         self.http.close()
+        self.brain.close()
         self.store.close()
 
     # -- settings -----------------------------------------------------------
@@ -189,6 +197,66 @@ class Controller:
     def save(self) -> None:
         """Persist current settings to disk."""
         save_settings(self.paths.settings_path, self.settings)
+
+    # -- onboarding / connection setup (FR: first-run + per-start check) ----
+
+    def connection_status(self) -> dict:
+        """Probe LM Studio and report what onboarding needs (runs every startup).
+
+        Returns the connection classification plus whether a key is stored and any
+        first-run bootstrap warnings. ``needs_setup`` is the single flag the UI uses
+        to decide whether to show the setup wizard — it never returns the key value
+        itself (FR-026/FR-077).
+        """
+        from .model.catalog import probe_connection
+
+        probe = probe_connection(self.http)
+        has_key = self.vault.has(self.settings.lmstudio_api_key_ref)
+        # Setup is needed when LM Studio is unreachable, or reachable but our key is
+        # rejected / the instance is protected and we have no working key.
+        needs_setup = (not probe["reachable"]) or (not probe["authorized"])
+        return {
+            "reachable": probe["reachable"],
+            "authorized": probe["authorized"],
+            "auth_required": probe["auth_required"],
+            "has_key": has_key,
+            "base_url": self.settings.lmstudio_base_url,
+            "needs_setup": needs_setup,
+            "warnings": list(self.bootstrap_warnings),
+        }
+
+    def update_connection(self, base_url: str | None, api_key: str | None) -> dict:
+        """Apply a new base URL and/or API key, rebuilding the live clients.
+
+        The key (when provided and non-empty) is written to the isolated vault, never
+        to settings/logs. A blank key clears any stored key (unprotected instance).
+        Returns the fresh :meth:`connection_status` so the caller can confirm success.
+        """
+        if base_url:
+            self.settings.lmstudio_base_url = base_url.strip()
+
+        ref = self.settings.lmstudio_api_key_ref
+        if api_key is not None:
+            stripped = api_key.strip()
+            if stripped:
+                self.vault.set(ref, stripped, owner="user")
+            else:
+                self.vault.delete(ref)
+        self.save()
+
+        # Rebuild the connection + every client that depends on the key.
+        self.connection = load_connection(
+            base_url=self.settings.lmstudio_base_url,
+            api_key=self.vault.inject({"k": ref}).get("k"),
+        )
+        try:
+            self.http.close()
+        except Exception:
+            pass
+        self.http = make_client(self.connection)
+        self.lifecycle = ModelLifecycle(self.http, self.connection)
+        self.engine.set_client(self.connection.openai_base, self.connection.api_key)
+        return self.connection_status()
 
     # -- live status broadcasting (FR-005/FR-007/FR-024) -------------------
 
@@ -372,6 +440,21 @@ class Controller:
             "overwrite. Use `parallel` only for independent operations — never for two "
             "edits to the same file."
         )
+        # Internet access: the model often wrongly assumes it is sandboxed offline. The
+        # `powershell` tool runs on the real host with full network access, so spell out
+        # that the agent CAN reach the internet and how to do it.
+        parts.append(
+            "\n## Internet access\n"
+            "You CAN access the internet. To READ a web page or call a JSON/HTTP API, "
+            "use the `fetch_url` tool: pass it a URL and it returns the page title, the "
+            "readable text (HTML stripped), and the links — no raw markup to wade through. "
+            "**Fetch a URL once, then answer from the returned text; never re-request the "
+            "same URL** (re-fetching wastes the context budget and stalls the run). If you "
+            "need scripting, downloads, or other shell work, the `powershell` tool also has "
+            "full network access (`Invoke-WebRequest`/`Invoke-RestMethod`/`curl`). Never tell "
+            "the user you cannot browse the web or fetch URLs. Configured MCP servers and "
+            "skills may also provide richer web tools when available."
+        )
         # Environment map: where the agent's home + key config files live, so the agent
         # goes straight to them instead of probing drives (no consent needed here —
         # the whole home folder is implicitly allowed).
@@ -449,6 +532,34 @@ class Controller:
                 "mention in your reply that you created it. Only put finished deliverables "
                 "here — use `workspace/` for scratch work."
             )
+        # Graph "brain" memory: tell the agent it exists and how to use it — but inject
+        # NO content (that's the whole point: recall on demand to save tokens).
+        parts.append(
+            "\n## Graph memory (your brain)\n"
+            "You have a persistent graph memory of nodes (each with a short summary) and "
+            "typed relationships between them; full per-node details are stored as Markdown. "
+            "Nothing from it is loaded automatically — recall only what you need. Use "
+            "`brain_search` to find relevant nodes, `brain_get` to read a node's details and "
+            "connections, and `brain_add_node`/`brain_link`/`brain_update` to record durable "
+            "facts, people, projects, decisions, and how they relate. To forget, use "
+            "`brain_delete` (remove one node by id) or `brain_clear` (erase the ENTIRE memory "
+            "— use only when the user asks to clear/wipe/forget everything). Prefer this over "
+            "dumping everything into the conversation, and consult it when a task may build on earlier work.\n"
+            "When you save a body of information (a website, profile, document, project, "
+            "etc.), build an INTERCONNECTED graph — never one giant node:\n"
+            "1. Create a SEPARATE node for each distinct entity (each person, project, skill, "
+            "job, place, contact method, concept, decision). Give each a specific `type` "
+            "(e.g. person, project, skill, experience, education, contact, concept). Put one "
+            "line in `summary` and ALL the specifics (descriptions, links, dates, numbers) in "
+            "`details` (Markdown).\n"
+            "2. Then `brain_link` the nodes with meaningful relationship types (e.g. person "
+            "`has_skill` skill, person `built` project, project `uses` skill, person "
+            "`worked_at` experience, person `reachable_via` contact). Aim for many small nodes "
+            "and many links, not a few big ones.\n"
+            "3. When fetching info from a website, first try its machine-readable file "
+            "(`<site>/agents.md` or `<site>/llms.txt`) before the HTML home page — fetch it "
+            "ONCE with `fetch_url`, then decompose it into nodes as above."
+        )
         learnings = memory_mod.load_learnings(self.paths.memory, scope)
         if learnings:
             parts.append(f"\n## Remembered learnings\n{learnings}")
@@ -470,6 +581,8 @@ class Controller:
             except Exception:
                 pass
         memory_mod.register_memory_tools(self.registry, self.paths.memory, scope)
+        from .capabilities.brain_tools import register_brain_tools
+        register_brain_tools(self.registry, self.brain)
 
     def start_manual_session(
         self, *, model: str | None = None, persona_id: str | None = None,
@@ -580,6 +693,15 @@ class Controller:
             # file tools' consent checks (single active run, FR-008).
             self.gate.current_session_id = session_id
 
+            # Detailed per-session JSON audit log (Documents/LMStudioClaw/logs/).
+            from .sessions import logbook
+            logger = logbook.SessionLogger(self.paths.logs_dir, session_id, meta={
+                "trigger_type": "automation" if automation_id else "manual",
+                "automation_id": automation_id, "persona_id": persona_id,
+                "model_key": model_key, "context_length": context_length,
+                "run_config": run_config.to_dict() if run_config else None,
+            })
+
             async def on_event(event: dict) -> None:
                 await self.hub.broadcast(session_id, event)
 
@@ -595,6 +717,8 @@ class Controller:
                     failure_point="model_load",
                 )
                 await on_event({"type": "error", "reason": str(exc), "point": "model_load"})
+                logger.event("error", reason=str(exc), point="model_load")
+                logger.finalize("failed", failure_point="model_load", failure_reason=str(exc))
                 self._set_model_status("error", model_key, reason=str(exc))
                 toast.notify("run_failed", f"Model load failed: {exc}")
                 self.hub.unregister(session_id)
@@ -603,6 +727,8 @@ class Controller:
 
             self.store.update_session(session_id, status="active")
             self._set_model_status("ready", loaded.key)
+            logger.event("model_load", model=loaded.key, instance_id=loaded.instance_id,
+                         context_length=loaded.context_length)
             await self._broadcast_status()
             try:
                 result: SessionResult = await self.engine.run_session(
@@ -616,6 +742,7 @@ class Controller:
                     unattended=unattended, initial_message=initial_message,
                     history=history, run_config=run_config,
                     summarize_mcp=self.settings.summarize_mcp_outputs,
+                    logger=logger,
                 )
                 self.store.update_session(
                     session_id, status=result.status,
@@ -633,10 +760,13 @@ class Controller:
                     await self.lifecycle.unload(loaded.instance_id)
                 except Exception:
                     pass
+                logger.event("model_unload", instance_id=loaded.instance_id)
                 self.store.clear_session_grants(session_id)
                 if self.gate.current_session_id == session_id:
                     self.gate.current_session_id = None
 
+            logger.finalize(result.status, failure_reason=result.failure_reason,
+                            failure_point=result.failure_point)
             self._finish_notify(result, automation_id)
             self.store.prune(self.settings.retention_days)
             # Tell the session view the run is over so the badge/controls update live

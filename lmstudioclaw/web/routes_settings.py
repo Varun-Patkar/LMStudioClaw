@@ -58,6 +58,52 @@ async def patch_settings(payload: dict, request: Request) -> dict:
     return ctrl.settings.to_dict()
 
 
+# -- Connection / onboarding (first-run + per-start setup check) ------------
+
+class ConnectionIn(BaseModel):
+    """A candidate LM Studio connection to test or save.
+
+    ``api_key`` is optional: omit it to test/save only the base URL, send an empty
+    string to clear a stored key (unprotected instance). The value is never echoed
+    back in any response (FR-026/FR-077).
+    """
+
+    base_url: str | None = None
+    api_key: str | None = None
+
+
+@router.get("/api/connection")
+async def get_connection(request: Request) -> dict:
+    """Report the current LM Studio connection state for the setup wizard.
+
+    The frontend calls this on every load (the "check each start" requirement); when
+    ``needs_setup`` is true it shows the onboarding wizard.
+    """
+    return _ctrl(request).connection_status()
+
+
+@router.post("/api/connection/test")
+async def test_connection_route(payload: ConnectionIn, request: Request) -> dict:
+    """Probe a candidate base URL + key without saving anything.
+
+    Powers the wizard's "Test connection" button so non-technical users can confirm a
+    key works before committing it.
+    """
+    import asyncio
+
+    from ..model.catalog import test_connection
+
+    # The probe does blocking HTTP; run it off the event loop.
+    return await asyncio.to_thread(test_connection, payload.base_url, payload.api_key)
+
+
+@router.post("/api/connection/save")
+async def save_connection_route(payload: ConnectionIn, request: Request) -> dict:
+    """Persist the base URL + key (to the vault) and rebuild the live clients."""
+    ctrl = _ctrl(request)
+    return ctrl.update_connection(payload.base_url, payload.api_key)
+
+
 # -- Phone tunnel ("See this on your phone") --------------------------------
 
 def _tunnel_payload(ctrl) -> dict:

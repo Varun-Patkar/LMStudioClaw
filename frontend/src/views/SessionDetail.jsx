@@ -127,9 +127,16 @@ export default function SessionDetail() {
   const [generating, setGenerating] = useState(false);
   const [budget, setBudget] = useState(null);
   const [consent, setConsent] = useState(null);
+  // Set when a turn hits the per-turn tool-iteration cap and asks whether to keep going.
+  const [continuePrompt, setContinuePrompt] = useState(null);
   const [ended, setEnded] = useState(false);
   const [ending, setEnding] = useState(false);
   const [draft, setDraft] = useState("");
+  // Shell-style prompt history: every sent/queued prompt is remembered so Up/Down in
+  // the composer recalls previous prompts (see onKey). histIdx is the browse position
+  // (null = editing the live draft); draftStash holds the in-progress draft so Down
+  // past the newest entry restores it.
+  const [history, setHistory] = useState([]);
   const [models, setModels] = useState([]);
   const [settings, setSettings] = useState({});
   const [changeOpen, setChangeOpen] = useState(false);
@@ -163,6 +170,8 @@ export default function SessionDetail() {
   const generatingRef = useRef(false);
   const queuedRef = useRef([]);
   const endedRef = useRef(false);
+  const histIdx = useRef(null);
+  const draftStash = useRef("");
   const scroller = useRef(null);
   const bodyRef = useRef(null);
   const atBottomRef = useRef(true);
@@ -188,8 +197,13 @@ export default function SessionDetail() {
 
   // Keep the transcript pinned to the newest message — but only while the user is
   // already at the bottom, so scrolling up to read history isn't yanked back down.
+  // Tool-call cards are skipped: during a long run they churn rapidly and auto-
+  // following each one makes the view snap/jump constantly. We still follow real
+  // assistant/user text (and the user can use the jump-to-bottom button anytime).
   useEffect(() => {
-    if (atBottomRef.current && scroller.current)
+    const last = messages[messages.length - 1];
+    const toolChurn = last && last.role === "tool";
+    if (!toolChurn && atBottomRef.current && scroller.current)
       scroller.current.scrollIntoView({ behavior: "smooth", block: "end" });
     recomputeScroll();
   }, [messages]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -282,7 +296,7 @@ export default function SessionDetail() {
           break;
         case "status":
           setStatus(evt.status);
-          if (TERMINAL.includes(evt.status)) { setEnded(true); setGen(false); setStopping(false); setActiveTool(null); finalizeStreaming(); toast(`Session ${evt.status}.`); }
+          if (TERMINAL.includes(evt.status)) { setEnded(true); setGen(false); setStopping(false); setActiveTool(null); setContinuePrompt(null); finalizeStreaming(); toast(`Session ${evt.status}.`); }
           break;
         case "token":
           if (!evt.text) break;
@@ -326,6 +340,7 @@ export default function SessionDetail() {
           setMessages((ms) => [...ms, { id: uid(), role: "system", content: `Context compacted: ${evt.tokens_before} → ${evt.tokens_after} tokens` }]);
           break;
         case "consent_request": setConsent(evt); break;
+        case "continue_request": setContinuePrompt(evt); break;
         case "error":
           setMessages((ms) => [...ms, { id: uid(), role: "system", content: `Error: ${evt.reason}` }]);
           break;
@@ -355,7 +370,15 @@ export default function SessionDetail() {
     const kind = generatingRef.current ? "steer" : "message";
     ws.current.send(JSON.stringify({ type: kind, text }));
     pushUser(text);
+    rememberPrompt(text);
     setDraft("");
+  }
+
+  /** Record a sent prompt in the recall history (dedupe consecutive repeats). */
+  function rememberPrompt(text) {
+    histIdx.current = null;
+    draftStash.current = "";
+    setHistory((h) => (h[h.length - 1] === text ? h : [...h, text]));
   }
 
   /** Line up the draft to be sent after the current turn fully ends (Alt+Enter). */
@@ -363,6 +386,7 @@ export default function SessionDetail() {
     const text = draft.trim();
     if (!text) return;
     setQueued((q) => [...q, { id: uid(), text }]);
+    rememberPrompt(text);
     setDraft("");
   }
 
@@ -445,8 +469,38 @@ export default function SessionDetail() {
       // While a turn is running, Alt+Enter queues for after it ends; Enter steers now.
       if (generatingRef.current && draft.trim() && e.altKey) queueDraft();
       else send();
+      return;
+    }
+    // Up/Down recall previous prompts (shell-style). In a multiline draft the arrow
+    // first moves the caret within the textarea; only when it's already on the first
+    // (Up) or last (Down) line does it step through history — so editing isn't hijacked.
+    if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      const el = e.target;
+      if (!el || el.selectionStart !== el.selectionEnd) return;  // a selection: leave it
+      if (e.key === "ArrowUp") {
+        const onFirstLine = el.value.lastIndexOf("\n", el.selectionStart - 1) === -1;
+        if (!onFirstLine || history.length === 0) return;
+        e.preventDefault();
+        if (histIdx.current === null) { draftStash.current = draft; histIdx.current = history.length; }
+        if (histIdx.current > 0) setDraftFromHistory(el, history[--histIdx.current]);
+      } else {
+        const onLastLine = el.value.indexOf("\n", el.selectionStart) === -1;
+        if (!onLastLine || histIdx.current === null) return;
+        e.preventDefault();
+        if (histIdx.current < history.length - 1) setDraftFromHistory(el, history[++histIdx.current]);
+        else { histIdx.current = null; setDraftFromHistory(el, draftStash.current); }
+      }
     }
   };
+
+  /** Replace the draft with a recalled prompt and place the caret at the end. */
+  function setDraftFromHistory(el, val) {
+    setDraft(val);
+    requestAnimationFrame(() => {
+      try { el.focus(); el.setSelectionRange(val.length, val.length); if (autoGrow) autoGrow(el); }
+      catch { /* noop */ }
+    });
+  }
 
   // Derive the plain-English "what's happening now" line from the session socket
   // state plus the app-wide model/queue status (so model loading is visible here).
@@ -488,6 +542,11 @@ export default function SessionDetail() {
           <button className="btn ghost sm" onClick={() => navigate("/sessions")}>← Back</button>
           <h2>Session</h2>
           <span className={"badge " + status}>{status}</span>
+          <span className="spacer" style={{ flex: 1 }} />
+          <a className="btn ghost sm" href={`/api/logs/${id}`} target="_blank" rel="noreferrer"
+             title="Open this session's detailed JSON audit log (system prompt, exact API messages, tool calls, compression)">
+            Audit log
+          </a>
         </div>
 
         {consent && (
@@ -498,6 +557,28 @@ export default function SessionDetail() {
               <button className="btn" onClick={() => decideConsent("session")}>Allow for session</button>
               <button className="btn green" onClick={() => decideConsent("permanent")}>Allow permanently</button>
               <button className="btn red" onClick={() => decideConsent("deny")}>Deny</button>
+            </div>
+          </div>
+        )}
+
+        {continuePrompt && (
+          <div className="consent">
+            <div>The agent made <strong>{continuePrompt.count}</strong> tool calls this turn and
+              hit the per-turn limit, but isn't finished. Keep going?</div>
+            <div className="row">
+              <button className="btn green" onClick={() => decideContinue(true)}>Keep going</button>
+              <button className="btn red" onClick={() => decideContinue(false)}>Stop</button>
+            </div>
+          </div>
+        )}
+
+        {continuePrompt && (
+          <div className="consent">
+            <div>The agent made <strong>{continuePrompt.count}</strong> tool calls this turn and
+              hit the per-turn limit, but isn't finished. Keep going?</div>
+            <div className="row">
+              <button className="btn green" onClick={() => decideContinue(true)}>Keep going</button>
+              <button className="btn red" onClick={() => decideContinue(false)}>Stop</button>
             </div>
           </div>
         )}
@@ -565,7 +646,7 @@ export default function SessionDetail() {
               <div className="composer2">
                 <SkillInput value={draft} rows={1}
                   placeholder="Message the agent…  (Enter to send, Shift+Enter for a new line, / for skills)"
-                  onChange={setDraft} autoGrow={autoGrow} onKeyDown={onKey} />
+                  onChange={(v) => { histIdx.current = null; setDraft(v); }} autoGrow={autoGrow} onKeyDown={onKey} />
                 {generating && draft.trim()
                   ? (altDown
                       ? <button className="btn send-btn steer queue" onClick={queueDraft} title="Queue for after this turn">

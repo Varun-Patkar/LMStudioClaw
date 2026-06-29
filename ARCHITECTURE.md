@@ -70,13 +70,15 @@ lmstudioclaw/
 │   ├── budget.py           # token estimate + context-window allocation
 │   ├── compaction.py       # ~90% summarize-and-replace compression
 │   ├── persona.py          # persona resolution (default + library)
-│   └── memory.py           # durable agent learnings (Documents memory/ area)
+│   ├── memory.py           # durable agent learnings (Documents memory/ area)
+│   └── brain.py            # graph memory: nodes+edges in graph.db, details in memory/brain/<id>.md
 ├── capabilities/
 │   ├── registry.py         # unified capability surface + default toolset + per-run effective_tools
 │   ├── run_config.py       # RunConfig: per-run model + tool overrides + MCP selection (002)
 │   ├── file_tools.py       # read(range)/list_dir/write/edit(exact|line-range)/grep/find (002)
 │   ├── shell_tool.py       # consent-gated, workspace-rooted PowerShell tool (002)
 │   ├── parallel_tool.py    # parallel meta-tool: run >=2 independent sub-calls concurrently (002)
+│   ├── brain_tools.py      # brain_search/get/add_node/link/update (home-area, no consent prompt)
 │   ├── skills.py           # SKILL.md discovery/validation + referenced scripts
 │   ├── tools.py            # custom python tools (trust gate, in-process exec)
 │   └── mcp_client.py       # MCP servers (stdio + HTTP/SSE w/ auth headers) via `mcp` SDK
@@ -86,7 +88,9 @@ lmstudioclaw/
 │   └── scheduler.py        # event-driven Daily/Interval scheduler + missed-run detection
 ├── sessions/
 │   ├── queue.py            # single-active-session FIFO, persisted + restored on startup (002)
-│   └── store.py            # SQLite (best-effort) + retention pruning + queued_runs + run_config
+│   ├── store.py            # SQLite (best-effort) + retention pruning + queued_runs + run_config
+│   ├── logbook.py          # detailed per-session JSON audit log + standalone HTML viewer
+│   └── logs_viewer.html    # bundled offline log viewer copied to Documents/.../logs/index.html
 ├── secrets/
 │   └── vault.py            # isolated secrets store (user-only writes, no agent read path)
 ├── notifications/
@@ -95,7 +99,7 @@ lmstudioclaw/
 │   ├── api.py              # FastAPI app factory + static SPA mount + /ws/status + health
 │   ├── tunnel.py           # opt-in VS Code dev tunnel + QR ("See this on your phone")
 │   ├── ws.py               # session hub + StatusHub (app-wide live model/run/queue) (002)
-│   ├── routes_*.py         # REST route groups (sessions, automations, capabilities, settings)
+│   ├── routes_*.py         # REST route groups (sessions, automations, capabilities, settings, brain)
 │   └── static/             # built React SPA (from frontend/): fluid ~90vw, runbar + queue panel (002)
 └── tray/
     └── icon.py             # pystray tray: Open (browser) / Quit (graceful shutdown)
@@ -119,6 +123,9 @@ flowchart TD
     engine --> compaction["orchestrator/compaction.py"]
     engine --> persona["orchestrator/persona.py"]
     engine --> memory["orchestrator/memory.py"]
+    app --> brain["orchestrator/brain.py<br/>graph.db memory"]
+    registry --> braintools["capabilities/brain_tools.py"]
+    braintools --> brain
 
     registry --> filetools["capabilities/file_tools.py"]
     registry --> shell["capabilities/shell_tool.py"]
