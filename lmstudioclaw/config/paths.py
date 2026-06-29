@@ -70,15 +70,25 @@ class AppPaths:
     secrets_dir: Path    # %APPDATA%/LMStudioClaw/secrets  (isolated; deny-listed)
     db_path: Path        # app_data/state.db
     settings_path: Path  # app_data/settings.json
+    app_root: Path       # the installed/cloned application directory (deny-listed)
 
     @property
     def deny_list(self) -> tuple[Path, ...]:
         """Canonical paths the consent gate must always refuse (FR-077).
 
-        Covers the isolated secrets directory and the controller's internal
-        application-data directory.
+        Covers (a) the isolated secrets directory, (b) the controller's internal
+        application-data directory, (c) the detailed session **logs** (the audit
+        trail — only the controller/webapp may write them, never the agent, so it
+        cannot tamper with or read its own prompt-injection record), and (d) the
+        application's own installed/cloned code (so the agent can never modify the
+        program it runs inside).
         """
-        return (_canon(self.secrets_dir), _canon(self.app_data))
+        return (
+            _canon(self.secrets_dir),
+            _canon(self.app_data),
+            _canon(self.logs_dir),
+            _canon(self.app_root),
+        )
 
 
 def _canon(path: Path) -> Path:
@@ -98,6 +108,14 @@ def resolve_paths() -> AppPaths:
     base = _documents_root() / APP_DIR_NAME
     app_data = _appdata_root() / APP_DIR_NAME
     secrets_dir = app_data / "secrets"
+    # The application's own code directory, deny-listed so the agent can never modify
+    # the program it runs inside. For a source checkout (``pyproject.toml`` at the
+    # repo root) deny the whole clone — it also holds the frontend source and built UI;
+    # for a site-packages install deny just the ``lmstudioclaw`` package directory so we
+    # don't over-broadly block all of site-packages.
+    _pkg_dir = Path(__file__).resolve().parents[1]       # .../lmstudioclaw
+    _clone_root = Path(__file__).resolve().parents[2]    # repo root / site-packages
+    app_root = _clone_root if (_clone_root / "pyproject.toml").exists() else _pkg_dir
     return AppPaths(
         base=_canon(base),
         skills=_canon(base / "skills"),
@@ -112,6 +130,7 @@ def resolve_paths() -> AppPaths:
         secrets_dir=_canon(secrets_dir),
         db_path=_canon(app_data / "state.db"),
         settings_path=_canon(app_data / "settings.json"),
+        app_root=_canon(app_root),
     )
 
 
