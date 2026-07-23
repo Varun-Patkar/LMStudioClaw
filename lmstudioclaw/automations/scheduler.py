@@ -84,10 +84,18 @@ def _next_interval(automation: dict, now: datetime) -> datetime | None:
 class Scheduler:
     """Drives automations on time, with event-driven sleep (no busy poll)."""
 
-    def __init__(self, store, enqueue: Callable[[dict], str]) -> None:
-        """Wire to the store and a callback that enqueues a fired automation."""
+    def __init__(self, store, enqueue: Callable[[dict], str],
+                 eval_trigger: Callable[[dict], bool] | None = None) -> None:
+        """Wire to the store and callbacks for enqueueing and evaluating triggers.
+
+        ``eval_trigger`` is called for ``trigger_type='python'`` automations (heartbeats)
+        before firing; the session is only enqueued when it returns truthy. It runs the
+        user's trigger code in a subprocess, so it is dispatched to a worker thread to
+        keep the event loop responsive.
+        """
         self._store = store
         self._enqueue = enqueue
+        self._eval_trigger = eval_trigger
         self._wakeup = asyncio.Event()
         self._stopped = False
 
@@ -146,15 +154,27 @@ class Scheduler:
                 pass  # time to fire
             if self._stopped:
                 break
-            self._fire(automation)
+            await self._fire(automation)
 
-    def _fire(self, automation: dict) -> None:
-        """Enqueue a fired automation and stamp its run bookkeeping."""
+    async def _fire(self, automation: dict) -> None:
+        """Evaluate any heartbeat trigger, enqueue if it fired, and stamp bookkeeping.
+
+        For ``trigger_type='python'`` (heartbeat) automations the session is only
+        enqueued when the trigger returns truthy; either way the interval advances from
+        now so evaluation keeps cadence. Time-based automations always fire.
+        """
         fired_at = datetime.now()
-        try:
-            self._enqueue(automation)
-        except Exception:
-            pass  # best-effort; controller records its own failures
+        should_fire = True
+        if automation.get("trigger_type") == "python" and self._eval_trigger is not None:
+            try:
+                should_fire = bool(await asyncio.to_thread(self._eval_trigger, automation))
+            except Exception:
+                should_fire = False  # eval errors are recorded by the callback itself
+        if should_fire:
+            try:
+                self._enqueue(automation)
+            except Exception:
+                pass  # best-effort; controller records its own failures
         nxt = next_fire({**automation, "last_run_at": fired_at.isoformat()}, fired_at)
         self._store.update_automation(
             automation["id"], last_run_at=fired_at.isoformat(),

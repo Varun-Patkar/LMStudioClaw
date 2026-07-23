@@ -32,9 +32,11 @@ def create_app(controller: Controller | None = None) -> FastAPI:
     from .routes_settings import router as settings_router
     from .routes_brain import router as brain_router
     from .routes_logs import router as logs_router
+    from .routes_triggers import router as triggers_router
 
     app.include_router(sessions_router)
     app.include_router(automations_router)
+    app.include_router(triggers_router)
     app.include_router(capabilities_router)
     app.include_router(settings_router)
     app.include_router(brain_router)

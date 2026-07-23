@@ -88,6 +88,29 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full map and control flow.
   can reach already-consented folders, is bounded by a timeout + output truncation, and
   raises the same consent prompt for paths outside consented folders; secrets/app
   internals are always denied.
+- **Heartbeats (feature: heartbeat).** A *heartbeat* is an interval automation gated by
+  a **trigger** — a standalone, reusable user-authored Python `def trigger() -> bool`.
+  Triggers are first-class entities: their own `triggers` table, `web/routes_triggers.py`
+  (`/api/triggers` CRUD + `/generate`, `/test`, `/{id}/run`, `/{id}/history`), and their
+  own **Triggers** page (`frontend/src/views/Triggers.jsx`, nav above Skills & Tools)
+  where you author from a prompt, edit, **test-run** (full output: bool result, stdout,
+  error, resulting `state`), and inspect run history. The editor is
+  `components/HeartbeatTrigger.jsx`; generation calls `Controller.generate_trigger_code`
+  → `Engine.complete` (load-run-unload like a session, refused while a session is active).
+  A trigger runs in a **silent** subprocess (`automations/trigger.py`, `CREATE_NO_WINDOW`
+  on Windows) with a 30s timeout (`TRIGGER_TIMEOUT`), captured stdout, and a tiny
+  persistent `state` dict so it can detect *changes* (e.g. "a new release appeared since
+  last run"); the last `state` is shown on the trigger. An **automation** carries a
+  `trigger_type` (`time` = legacy fixed schedule, or `python` = heartbeat) and, for
+  heartbeats, a `trigger_id` selecting a saved trigger (UI: a segmented **switch** +
+  trigger dropdown on `views/Automations.jsx`; interval-only, **min 5 minutes**,
+  `MIN_HEARTBEAT_MINUTES`). The scheduler (`automations/scheduler.py`) evaluates the
+  trigger off the event loop (`asyncio.to_thread`) via the `eval_trigger` callback
+  (`Controller.run_saved_trigger` → `evaluate_trigger`) and enqueues the session only on a
+  truthy result. Every evaluation is recorded in `trigger_runs` (keyed by `trigger_id`:
+  result, error, stdout, duration) and surfaced like Power Automate run history
+  (`components/TriggerHistory.jsx`) so failures are never hidden. The trigger Python is
+  user-authored/approved (like a custom tool), isolated in the subprocess.
 - **Per-run config (feature 002).** Sessions and automations may carry a
   `RunConfig{model, tool_overrides, mcp_selection}`. Resolution is **most-granular-wins**
   (MCP selection picks servers, then per-tool overrides apply on top) and never mutates

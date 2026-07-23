@@ -8,6 +8,7 @@ import Sidebar from "./components/Sidebar.jsx";
 import Sessions from "./views/Sessions.jsx";
 import SessionDetail from "./views/SessionDetail.jsx";
 import Automations from "./views/Automations.jsx";
+import Triggers from "./views/Triggers.jsx";
 import Capabilities from "./views/Capabilities.jsx";
 import Settings from "./views/Settings.jsx";
 import SetupWizard from "./components/SetupWizard.jsx";
@@ -86,6 +87,7 @@ export default function App() {
                 <Route path="/sessions" element={<Page><Sessions /></Page>} />
                 <Route path="/sessions/:id" element={<Page><SessionDetail /></Page>} />
                 <Route path="/automations" element={<Page><Automations /></Page>} />
+                <Route path="/triggers" element={<Page><Triggers /></Page>} />
                 <Route path="/capabilities" element={<Page><Capabilities /></Page>} />
                 <Route path="/brain" element={<Page><Brain /></Page>} />
                 <Route path="/settings" element={<Page><Settings /></Page>} />

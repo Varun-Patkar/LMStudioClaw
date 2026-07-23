@@ -72,6 +72,12 @@ CREATE TABLE IF NOT EXISTS automations (
     last_run_result TEXT,
     next_run_at TEXT,
     run_config TEXT,
+    trigger_type TEXT NOT NULL DEFAULT 'time',
+    trigger_prompt TEXT,
+    trigger_code TEXT,
+    trigger_state TEXT,
+    last_trigger_at TEXT,
+    last_trigger_value INTEGER,
     created_at TEXT NOT NULL
 );
 
@@ -137,6 +143,32 @@ CREATE TABLE IF NOT EXISTS queued_runs (
     started INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS triggers (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    prompt TEXT,
+    code TEXT NOT NULL,
+    state TEXT,
+    last_run_at TEXT,
+    last_value INTEGER,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS trigger_runs (
+    id TEXT PRIMARY KEY,
+    trigger_id TEXT NOT NULL,
+    at TEXT NOT NULL,
+    value INTEGER NOT NULL DEFAULT 0,
+    fired INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    stdout TEXT,
+    duration_ms INTEGER,
+    session_id TEXT,
+    automation_id TEXT
+);
 """
 
 
@@ -182,6 +214,14 @@ class Store:
             ("sessions", "run_config TEXT"),
             ("automations", "run_config TEXT"),
             ("capabilities", "metadata TEXT"),
+            # Heartbeat triggers (Python-based conditional automations).
+            ("automations", "trigger_type TEXT NOT NULL DEFAULT 'time'"),
+            ("automations", "trigger_prompt TEXT"),
+            ("automations", "trigger_code TEXT"),
+            ("automations", "trigger_state TEXT"),
+            ("automations", "last_trigger_at TEXT"),
+            ("automations", "last_trigger_value INTEGER"),
+            ("automations", "trigger_id TEXT"),
         ):
             with self._lock:
                 try:
@@ -189,6 +229,30 @@ class Store:
                     self._conn.commit()
                 except sqlite3.Error:
                     pass  # column already present or table will be created by schema
+        self._migrate_trigger_runs()
+
+    def _migrate_trigger_runs(self) -> None:
+        """Re-key an early ``trigger_runs`` table (keyed by automation_id) to trigger_id.
+
+        The heartbeat feature briefly stored trigger history per-automation; triggers are
+        now standalone entities, so history is keyed by ``trigger_id``. This was never a
+        released schema, so the rare old table is simply rebuilt (best-effort).
+        """
+        with self._lock:
+            try:
+                cols = {r[1] for r in self._conn.execute("PRAGMA table_info(trigger_runs)")}
+                if cols and "trigger_id" not in cols:
+                    self._conn.execute("DROP TABLE trigger_runs")
+                    self._conn.execute(
+                        """CREATE TABLE trigger_runs (
+                               id TEXT PRIMARY KEY, trigger_id TEXT NOT NULL, at TEXT NOT NULL,
+                               value INTEGER NOT NULL DEFAULT 0, fired INTEGER NOT NULL DEFAULT 0,
+                               error TEXT, stdout TEXT, duration_ms INTEGER, session_id TEXT,
+                               automation_id TEXT)"""
+                    )
+                    self._conn.commit()
+            except sqlite3.Error:
+                pass
 
     def close(self) -> None:
         """Close the underlying connection (best-effort)."""
@@ -388,14 +452,15 @@ class Store:
             """INSERT INTO automations
                (id, name, task, schedule_type, daily_days, daily_time, interval_unit,
                 interval_value, session_mode, persona_id, model_override, enabled,
-                next_run_at, run_config, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                next_run_at, run_config, trigger_type, trigger_id, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (aid, data["name"], data["task"], data["schedule_type"],
              json.dumps(data.get("daily_days")) if data.get("daily_days") is not None else None,
              data.get("daily_time"), data.get("interval_unit"), data.get("interval_value"),
              data.get("session_mode", "new"), data.get("persona_id"),
              data.get("model_override"), 1 if data.get("enabled", True) else 0,
-             data.get("next_run_at"), json.dumps(rc) if rc is not None else None, _now()),
+             data.get("next_run_at"), json.dumps(rc) if rc is not None else None,
+             data.get("trigger_type", "time"), data.get("trigger_id"), _now()),
         )
         return aid
 
@@ -405,6 +470,10 @@ class Store:
             fields["daily_days"] = json.dumps(fields["daily_days"])
         if "run_config" in fields and fields["run_config"] is not None:
             fields["run_config"] = json.dumps(fields["run_config"])
+        if "trigger_state" in fields and fields["trigger_state"] is not None:
+            fields["trigger_state"] = json.dumps(fields["trigger_state"])
+        if "last_trigger_value" in fields and fields["last_trigger_value"] is not None:
+            fields["last_trigger_value"] = 1 if fields["last_trigger_value"] else 0
         if "enabled" in fields:
             fields["enabled"] = 1 if fields["enabled"] else 0
         cols = ", ".join(f"{k}=?" for k in fields)
@@ -425,6 +494,83 @@ class Store:
     def delete_automation(self, automation_id: str) -> None:
         """Remove an automation by id."""
         self._exec("DELETE FROM automations WHERE id=?", (automation_id,))
+
+    # -- Triggers (standalone heartbeat conditions) -------------------------
+
+    def create_trigger(self, *, name: str, prompt: str | None, code: str,
+                        state: dict | None = None) -> str:
+        """Insert a standalone trigger definition and return its id."""
+        tid = new_id()
+        self._exec(
+            """INSERT INTO triggers (id, name, prompt, code, state, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?)""",
+            (tid, name, prompt, code,
+             json.dumps(state) if state is not None else None, _now(), _now()),
+        )
+        return tid
+
+    def update_trigger(self, trigger_id: str, **fields: Any) -> None:
+        """Patch a trigger's fields (serializes ``state``; stamps ``updated_at``)."""
+        if "state" in fields and fields["state"] is not None:
+            fields["state"] = json.dumps(fields["state"])
+        if "last_value" in fields and fields["last_value"] is not None:
+            fields["last_value"] = 1 if fields["last_value"] else 0
+        fields.setdefault("updated_at", _now())
+        cols = ", ".join(f"{k}=?" for k in fields)
+        self._exec(f"UPDATE triggers SET {cols} WHERE id=?", (*fields.values(), trigger_id))
+
+    def get_trigger(self, trigger_id: str) -> dict[str, Any] | None:
+        """Return a trigger row with ``state`` decoded to a dict."""
+        row = self._query_one("SELECT * FROM triggers WHERE id=?", (trigger_id,))
+        return _decode_trigger(row) if row else None
+
+    def list_triggers(self) -> list[dict[str, Any]]:
+        """List all triggers (newest first) with ``state`` decoded."""
+        return [_decode_trigger(r)
+                for r in self._query("SELECT * FROM triggers ORDER BY created_at DESC")]
+
+    def delete_trigger(self, trigger_id: str) -> None:
+        """Remove a trigger and its run history."""
+        self._exec("DELETE FROM triggers WHERE id=?", (trigger_id,))
+        self._exec("DELETE FROM trigger_runs WHERE trigger_id=?", (trigger_id,))
+
+    # -- Trigger run history (heartbeat visibility) -------------------------
+
+    def add_trigger_run(
+        self, trigger_id: str, *, value: bool, fired: bool,
+        error: str | None = None, stdout: str | None = None,
+        duration_ms: int | None = None, session_id: str | None = None,
+        automation_id: str | None = None,
+    ) -> str:
+        """Record one trigger evaluation so its result/error stays visible."""
+        rid = new_id()
+        self._exec(
+            """INSERT INTO trigger_runs
+               (id, trigger_id, at, value, fired, error, stdout, duration_ms,
+                session_id, automation_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (rid, trigger_id, _now(), 1 if value else 0, 1 if fired else 0,
+             error, stdout, duration_ms, session_id, automation_id),
+        )
+        return rid
+
+    def list_trigger_runs(self, trigger_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        """Return recent evaluations for a trigger, newest first."""
+        return self._query(
+            "SELECT * FROM trigger_runs WHERE trigger_id=? ORDER BY at DESC LIMIT ?",
+            (trigger_id, limit),
+        )
+
+    def prune_trigger_runs(self, trigger_id: str, *, keep: int = 200) -> None:
+        """Trim trigger history to the most recent ``keep`` rows (best-effort)."""
+        self._exec(
+            """DELETE FROM trigger_runs WHERE trigger_id=? AND id NOT IN (
+                   SELECT id FROM trigger_runs WHERE trigger_id=?
+                   ORDER BY at DESC LIMIT ?
+               )""",
+            (trigger_id, trigger_id, keep),
+        )
+
 
     # -- Personas -----------------------------------------------------------
 
@@ -676,4 +822,19 @@ def _decode_automation(row: dict[str, Any]) -> dict[str, Any]:
             row["run_config"] = json.loads(row["run_config"])
         except (json.JSONDecodeError, TypeError):
             row["run_config"] = None
+    if row.get("trigger_state"):
+        try:
+            row["trigger_state"] = json.loads(row["trigger_state"])
+        except (json.JSONDecodeError, TypeError):
+            row["trigger_state"] = None
+    return row
+
+
+def _decode_trigger(row: dict[str, Any]) -> dict[str, Any]:
+    """Decode a trigger row's JSON ``state`` field to a dict."""
+    if row.get("state"):
+        try:
+            row["state"] = json.loads(row["state"])
+        except (json.JSONDecodeError, TypeError):
+            row["state"] = None
     return row

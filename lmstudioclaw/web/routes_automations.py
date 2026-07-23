@@ -9,6 +9,12 @@ from .routes_sessions import RunConfigIn
 
 router = APIRouter(prefix="/api/automations", tags=["automations"])
 
+# Minimum interval (minutes) for a heartbeat: evaluating user Python more often than
+# this wastes CPU and a model can't even initialize within a tighter window.
+MIN_HEARTBEAT_MINUTES = 5
+
+_UNIT_MINUTES = {"minutes": 1, "hours": 60, "days": 1440}
+
 
 class AutomationIn(BaseModel):
     """Create/update payload for an automation."""
@@ -25,6 +31,10 @@ class AutomationIn(BaseModel):
     model_override: str | None = None
     run_config: RunConfigIn | None = None
     enabled: bool = True
+    # Heartbeat: references a standalone trigger (see routes_triggers) by id when
+    # ``trigger_type='python'``. ``time`` keeps the legacy fixed-schedule behaviour.
+    trigger_type: str = Field(default="time", pattern="^(time|python)$")
+    trigger_id: str | None = None
 
 
 def _ctrl(request: Request):
@@ -47,7 +57,7 @@ async def create_automation(payload: AutomationIn, request: Request) -> dict:
         raise HTTPException(422, "Automation name is required.")
     if not data["task"].strip():
         raise HTTPException(422, "Task / instruction is required.")
-    _validate_schedule(data)
+    _validate_schedule(data, ctrl)
     aid = ctrl.store.create_automation(data)
     if ctrl.scheduler is not None:
         ctrl.scheduler.refresh()
@@ -97,8 +107,20 @@ async def run_now(automation_id: str, request: Request) -> dict:
     return {"session_id": session_id}
 
 
-def _validate_schedule(data: dict) -> None:
-    """Validate schedule fields per data-model rules."""
+def _validate_schedule(data: dict, ctrl) -> None:
+    """Validate schedule + trigger fields per data-model rules."""
+    if data.get("trigger_type") == "python":
+        trigger_id = data.get("trigger_id")
+        if not trigger_id or ctrl.store.get_trigger(trigger_id) is None:
+            raise HTTPException(422, "A heartbeat must reference an existing trigger.")
+        if data["schedule_type"] != "interval":
+            raise HTTPException(422, "A heartbeat must use an interval schedule.")
+        minutes = _UNIT_MINUTES.get(data.get("interval_unit"), 0) * (data.get("interval_value") or 0)
+        if minutes < MIN_HEARTBEAT_MINUTES:
+            raise HTTPException(
+                422, f"A heartbeat interval must be at least {MIN_HEARTBEAT_MINUTES} minutes."
+            )
+        return
     if data["schedule_type"] == "daily":
         if not data.get("daily_days") or not data.get("daily_time"):
             raise HTTPException(422, "Daily schedule requires daily_days and daily_time")

@@ -613,6 +613,21 @@ class Engine:
                 return False
         return consent
 
+    async def complete(
+        self, *, model_id: str, messages: list[dict], max_tokens: int = 1024,
+        temperature: float = 0.2,
+    ) -> str:
+        """Run a single, non-streaming chat completion and return the text.
+
+        Used for one-shot generation tasks (e.g. authoring a heartbeat trigger from a
+        natural-language prompt) that don't need the full interactive session loop.
+        """
+        resp = await self._client.chat.completions.create(
+            model=model_id, messages=messages,
+            max_tokens=max_tokens, temperature=temperature,
+        )
+        return resp.choices[0].message.content or ""
+
     async def aclose(self) -> None:
         """Close the underlying OpenAI client."""
         await self._client.close()

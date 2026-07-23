@@ -33,6 +33,37 @@ from .sessions.store import Store
 from .web.tunnel import TunnelManager
 from .web.ws import SessionHub, StatusHub
 
+# Hard wall-clock limit for evaluating a heartbeat trigger function (seconds).
+TRIGGER_TIMEOUT = 30.0
+
+# System prompt that steers the model to emit a clean ``trigger()`` function.
+_TRIGGER_SYS_PROMPT = (
+    "You write a single Python function for a 'heartbeat' trigger. Output ONLY Python "
+    "code, no prose, no explanation. Define exactly one function `def trigger() -> bool:` "
+    "that returns True when the described condition is met and False otherwise. You may "
+    "import from the standard library and common packages (e.g. urllib.request, json, "
+    "datetime; requests/httpx if available) and call network APIs. A module-level dict "
+    "named `state` is available and persists between runs — read and write it to remember "
+    "values across calls (e.g. the last version you saw) so you can detect changes. Do not "
+    "call the function yourself, do not use input(), and keep it fast (it runs on a timer)."
+)
+
+
+def _extract_code(text: str) -> str:
+    """Strip Markdown code fences from a model reply, returning bare Python source."""
+    text = (text or "").strip()
+    if "```" in text:
+        # Take the content of the first fenced block, dropping an optional language tag.
+        parts = text.split("```")
+        if len(parts) >= 3:
+            block = parts[1]
+            if "\n" in block:
+                first, rest = block.split("\n", 1)
+                if first.strip().lower() in ("python", "py", ""):
+                    block = rest
+            return block.strip()
+    return text
+
 
 class Controller:
     """Owns all runtime services and coordinates session execution."""
@@ -105,7 +136,8 @@ class Controller:
         try:
             from .automations.scheduler import Scheduler
 
-            self.scheduler = Scheduler(self.store, self.enqueue_automation)
+            self.scheduler = Scheduler(self.store, self.enqueue_automation,
+                                       eval_trigger=self.run_saved_trigger)
             self.scheduler.report_missed(toast.notify)
             self._scheduler_task = asyncio.create_task(self.scheduler.run())
         except Exception:
@@ -409,6 +441,95 @@ class Controller:
             {"key": chosen.key, "max_context_length": chosen.max_context_length}
         )
         return chosen.key, ctx
+
+    # -- heartbeat triggers -------------------------------------------------
+
+    async def generate_trigger_code(self, prompt: str, model_key: str | None = None) -> str:
+        """Generate a ``trigger()`` function from a natural-language prompt.
+
+        Loads the chosen (or default) model, runs one completion, then unloads — the
+        same load-run-unload discipline as a session. Refuses while a session is using
+        the model (single-active invariant). Returns bare Python source.
+        """
+        if not (prompt or "").strip():
+            raise ValueError("A prompt is required to generate trigger code.")
+        if self.store.active_or_loading() is not None:
+            raise RuntimeError(
+                "A session is currently using the model. Try again once it finishes."
+            )
+        key, ctx = self._resolve_model(model_key)
+        self._set_model_status("loading", key)
+        await self._broadcast_status()
+        loaded = await self.lifecycle.load(key, ctx)
+        try:
+            self._set_model_status("ready", loaded.key)
+            await self._broadcast_status()
+            text = await self.engine.complete(
+                model_id=loaded.key,
+                messages=[
+                    {"role": "system", "content": _TRIGGER_SYS_PROMPT},
+                    {"role": "user", "content": prompt.strip()},
+                ],
+                max_tokens=900,
+            )
+        finally:
+            try:
+                await self.lifecycle.unload(loaded.instance_id)
+            except Exception:
+                pass  # best-effort unload; single-model invariant restored on next load
+            self._set_model_status("idle", None)
+            await self._broadcast_status()
+        return _extract_code(text)
+
+    def run_saved_trigger(self, automation: dict) -> bool:
+        """Evaluate the trigger referenced by a heartbeat automation (scheduler hook).
+
+        Returns True when the trigger fired (the session should be enqueued). Delegates
+        to :meth:`evaluate_trigger`, which persists state and records run history so the
+        result/error is always visible.
+        """
+        trigger_id = automation.get("trigger_id")
+        if not trigger_id:
+            return False
+        trigger = self.store.get_trigger(trigger_id)
+        if trigger is None:
+            return False
+        return self.evaluate_trigger(trigger, automation_id=automation.get("id"))
+
+    def evaluate_trigger(self, trigger: dict, *, automation_id: str | None = None) -> bool:
+        """Run a saved trigger once, persist its state, and log the run. Returns fired.
+
+        Used both by the scheduler (heartbeat firing) and the Triggers page "Run now"
+        button. Every evaluation appends a ``trigger_runs`` row (result, error, stdout,
+        duration) so failures are never hidden.
+        """
+        from datetime import datetime
+        import time as _time
+
+        from .automations import trigger as trigger_mod
+
+        code = trigger.get("code") or ""
+        if not code.strip():
+            return False
+        state = trigger.get("state") or {}
+        started = _time.monotonic()
+        result = trigger_mod.evaluate(code, state, timeout=TRIGGER_TIMEOUT)
+        duration_ms = int((_time.monotonic() - started) * 1000)
+        self.store.update_trigger(
+            trigger["id"], state=result.state, last_run_at=datetime.now().isoformat(),
+            last_value=result.value, last_error=result.error,
+        )
+        self.store.add_trigger_run(
+            trigger["id"], value=result.value, fired=result.value,
+            error=result.error, stdout=result.stdout, duration_ms=duration_ms,
+            automation_id=automation_id,
+        )
+        self.store.prune_trigger_runs(trigger["id"])
+        if result.error:
+            msg = f"Trigger '{trigger.get('name')}' errored."
+            self.store.add_notification(type="trigger_error", message=msg)
+            toast.notify("trigger_error", msg)
+        return result.value
 
     def session_output_dir(self, session_id: str, *, create: bool = False):
         """Return (and optionally create) the per-session output folder.
