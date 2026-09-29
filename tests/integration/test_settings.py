@@ -6,6 +6,9 @@ a per-model context preference is clamped, saved, and reapplied on load.
 
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
+
 from lmstudioclaw.config.settings import Settings, load_settings, save_settings
 from lmstudioclaw.model.context_prefs import preferred_context, set_context_pref
 
@@ -19,6 +22,30 @@ def test_theme_and_default_model_persist(temp_app_paths):
     reloaded = load_settings(temp_app_paths.settings_path)
     assert reloaded.theme == "dark"
     assert reloaded.default_model == "model-x"
+
+
+def test_model_labels_persist(temp_app_paths):
+    settings = load_settings(temp_app_paths.settings_path)
+    settings.model_labels = {"model-x": "Fast - Model X"}
+    save_settings(temp_app_paths.settings_path, settings)
+
+    assert load_settings(temp_app_paths.settings_path).model_labels == {"model-x": "Fast - Model X"}
+
+
+def test_model_list_uses_saved_label_without_changing_key(monkeypatch):
+    from lmstudioclaw.web import routes_settings
+
+    model = SimpleNamespace(
+        key="model-x", display_name="Model X", max_context_length=8192,
+        quantization="Q4", size_bytes=123, capabilities=[], is_loaded=False,
+    )
+    monkeypatch.setattr(routes_settings, "list_models", lambda _http: ([model], True))
+    controller = SimpleNamespace(http=None, settings=SimpleNamespace(model_labels={"model-x": "Fast - Model X"}))
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(controller=controller)))
+
+    result = asyncio.run(routes_settings.get_models(request))
+    assert result["models"][0]["key"] == "model-x"
+    assert result["models"][0]["display_name"] == "Fast - Model X"
 
 
 def test_compression_threshold_clamped():

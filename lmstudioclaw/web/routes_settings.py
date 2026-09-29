@@ -166,7 +166,7 @@ async def get_models(request: Request) -> dict:
         "connected": connected,
         "models": [
             {
-                "key": m.key, "display_name": m.display_name,
+                "key": m.key, "display_name": ctrl.settings.model_labels.get(m.key) or m.display_name,
                 "max_context_length": m.max_context_length,
                 # Effective pinned context (saved preference clamped to model max),
                 # so the UI can show the value the user actually saved.

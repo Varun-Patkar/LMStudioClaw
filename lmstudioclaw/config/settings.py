@@ -19,6 +19,7 @@ class Settings:
 
     theme: str = "system"                      # dark | light | system
     default_model: str | None = None
+    model_labels: dict[str, str] = field(default_factory=dict)
     startup_launch: bool = False               # launch on login, start minimized
     notifications: dict[str, bool] = field(
         default_factory=lambda: {
