@@ -41,7 +41,7 @@ class ModelLifecycle:
 
     def _load_sync(self, model_key: str, context_length: int | None) -> dict:
         """Load a model via ``/api/v1/models/load`` (blocking)."""
-        body: dict = {"model": model_key, "echo_load_config": True}
+        body: dict = {"model": model_key, "echo_load_config": True, "parallel": 1}
         if context_length is not None:
             body["context_length"] = context_length
         resp = self._client.post("/api/v1/models/load", json=body, timeout=600)

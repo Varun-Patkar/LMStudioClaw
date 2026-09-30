@@ -71,3 +71,21 @@ def test_per_model_context_pref_clamped_and_applied(monkeypatch, tmp_path):
     assert applied2 == cp.MIN_CONTEXT
     # Reapplied on (re)load.
     assert preferred_context(model) == cp.MIN_CONTEXT
+
+
+def test_model_load_uses_single_parallel_prediction():
+    from lmstudioclaw.model.lifecycle import ModelLifecycle
+
+    requests = []
+
+    class Client:
+        def post(self, path, json, timeout):
+            requests.append((path, json))
+            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {})
+
+    lifecycle = ModelLifecycle(Client(), None)
+    lifecycle._load_sync("qwen/qwen3.5-9b", 131072)
+
+    assert requests[0][0] == "/api/v1/models/load"
+    assert requests[0][1]["context_length"] == 131072
+    assert requests[0][1]["parallel"] == 1
